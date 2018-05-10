@@ -28,6 +28,7 @@ from util import *
 class Fusion:
     def __init__(self, tsdf, subsample_rate = 5.0):
         self._tsdf = tsdf
+        self._nodes = []
         self.marching_cubes()
         self.construct_graph(subsample_rate)
         
@@ -41,6 +42,14 @@ class Fusion:
         # uniform sampling
         nodes_v = uniform_sample(self._vertices,radius)
 
+        '''
+        TO-DO:
+        The paper never gives an equation for dgw!!! We should figure out a way to assign a weight to each deformation node.
+        dgw influences weights in DQB, psdf update and regularization so it is quite important
+        '''
+
+        for dgv in nodes_v:
+            self._nodes.append((dgv,np.identity(4),0.0))
     
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame (medium)
     def updateTSDF(self, curr_tsdf):
