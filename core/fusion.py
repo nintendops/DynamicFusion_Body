@@ -11,26 +11,36 @@ To process a new frame, we need two things: tsdf of the new frame and correpondi
 
 fusion.solve(corr_to_current_frame)
 fusion.updateTSDF(tsdf_of_current_frame)
-fusion.update_graph()
 fusion.marching_cubes()
+fusion.update_graph()
+
 
 All input/output datatypes should be be numpy arrays.   
 
 '''
 
 import numpy as np
-from scipy.special import KDTree
-from .util import *
+from numpy import linalg as la
+from scipy.spatial import KDTree
+from skimage import measure
+from util import *
 
 class Fusion:
-    def __init__(self, tsdf):
+    def __init__(self, tsdf, subsample_rate = 5.0):
         self._tsdf = tsdf
-        self.construct_graph()
         self.marching_cubes()
-
+        self.construct_graph(subsample_rate)
+        
     # Construct deformation graph from canonical vertices (easy)
-    def construct_graph(self):
-        pass
+    def construct_graph(self, subsample_rate):
+        vert_avg = np.average(self._vertices, axis=0)
+        average_distances = []
+        for f in self._faces:
+            average_distances.append(self.average_dist_from_face(f))
+        radius = decimation_factor * np.average(np.array(average_distances))
+        # uniform sampling
+        nodes_v = uniform_sample(self._vertices,radius)
+
     
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame (medium)
     def updateTSDF(self, curr_tsdf):
@@ -61,7 +71,7 @@ class Fusion:
     
     # Mesh vertices and normal extraction from current tsdf in canonical space (use library)
     def marching_cubes(self):
-        pass
+        self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf, level=0.1,allow_degenerate=False)  
 
     # Write the current warp field to file (easy)
     def write_warp_field(self, path, filename):
@@ -76,9 +86,15 @@ class Fusion:
     # Process a warp field file and write the live frame mesh
     def write_live_frame_mesh(self,path,filename, warpfield_path):
         pass
-
-
     
+    def average_dist_from_face(self, f):
+        v1 = self._vertices[f[0]]
+        v2 = self._vertices[f[1]]
+        v3 = self._vertices[f[2]]
+        return (cal_dist(v1,v2) + cal_dist(v1,v3) + cal_dist(v2,v3))/3
 
+                                    
+# helper functions
+def cal_dist(a,b):
+    return la.norm(a-b)
 
-    

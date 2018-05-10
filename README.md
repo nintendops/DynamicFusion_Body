@@ -1,4 +1,4 @@
-DynamicFusion Implementation, adapted to reconstruct body from multi-view imagas/ranged data
+DynamicFusion Implementation, adapted to reconstruct body from multi-view images/ranged data
 
 To-do:
 1. Model for volumetric warp field
