@@ -19,9 +19,12 @@ All input/output datatypes should be be numpy arrays.
 
 '''
 
+import math
 import numpy as np
 from numpy import linalg as la
 from scipy.spatial import KDTree
+from scipy.optimize import least_squares
+from scipy.sparse import lil_matrix
 from skimage import measure
 from util import *
 
@@ -34,9 +37,9 @@ class Fusion:
         self._neighbor_look_up = []
         self._correspondences = None
         self._kdtree = None
-
+        self._opt_result = None
         self.marching_cubes()
-        self.construct_graph(subsample_rate, knn)
+        self.construct_graph()
         
     # Construct deformation graph from canonical vertices (easy)
     def construct_graph(self):
@@ -46,14 +49,18 @@ class Fusion:
             average_distances.append(self.average_edge_dist_in_face(f))
         radius = self._subsample_rate * np.average(np.array(average_distances))
         # uniform sampling
-        nodes_v = uniform_sample(self._vertices,radius)
+        nodes_v, nodes_idx = uniform_sample(self._vertices,radius)
 
         '''
+        Each node is a 4-tuple (index of corresponding surface vertex dg_idx, 3D position dg_v, 4x4 Transformation dg_se3, weight dg_w) 
         HackHack:
         Not sure how to determine dgw. Use 1 for now.
         '''
-        for dgv in nodes_v:
-            self._nodes.append((dgv,np.identity(4),1.0))
+        for i in range(len(nodes_v)):
+            self._nodes.append((nodes_idx[i],
+                                nodes_v[i],
+                                np.identity(4),
+                                1.0))
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
@@ -70,41 +77,77 @@ class Fusion:
     def update_graph(self):
         pass
 
+    # Solve for a warp field {dg_SE} with correspondences to the live frame
     '''
-    Solve for a warp field {dg_SE} with correspondences to the live frame
+    Correspondences format: A list of 3D corresponding points in live frame. 
+                            Length should equal the length of surface vertices (self._vertices). 
+                            The indices should also match with the surface vertices array indices. 
+
     E = Data_term(Warp Field, surface points, surface normals) + Regularization_term(Warp Field, deformation graph)
-    Nonlinear least square problem. The paper solved it by Iterative Gauss-Newton with a Sparse Cholesky Solver solving a linear system at each iteration. 
+    Nonlinear least square problem. The paper solved it by Iterative Gauss-Newton with a Sparse Cholesky Solver.
     how about scipy.optimize.least_squares?    
     '''
-    def solve(self, correspondences, tukey_data_weight =  0.01, tukey_regularization_weight = 0.0001, regularization_weight = 200):
-        # (ps,pl) = (point in canonical frame, point in live frame)
+    def solve(self, correspondences,
+              tukey_data_weight =  0.01,
+              tukey_regularization_weight = 0.0001,
+              regularization_weight = 200):
         self._correspondences = correspondences
-        values = np.concatenate([ dg[1] for dg in self._nodes], axis=0).flatten()
+        values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
+        # We may consider using other optimization library
+        self._opt_result = least_squares(computef,
+                                         values,
+                                         jac='3-point',
+                                         tr_solver='lsmr',
+                                         args=(tuky_data_weight, tukey_regularization_weight, regularization_weight))
 
-        
-    # Compute residual function. Inputs are {dg_SE3}
-    def computef(self, x):
-        # Data Term
-        data_energy = []
-        idx = 0
+    # TODO, Optional: we can compute a sparsity structure to greatly speed up the optimizer
+    def computeSparsity(self, n):
+        sparsity = lil_matrix((n,n), dtype=np.float32)
+        '''
+        fill non-zero entries with 1
+        '''
+        return sparsity
+                               
+    # Compute residual function. Input is a flattened vector {dg_SE3}
+    def computef(self, x, tdw, trw, rw):
+        f = []
         matrices = x.reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
-        for vert in self._vertices:
-            locations = self._neighbor_look_up[idx]
-            
 
+        # Data Term
+        for idx in range(len(self._vertices)):
+            locations = self._neighbor_look_up[idx]
+            knn_matrices = [matrices[i] for i in locations]
+            vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, self._normals[idx])
+            p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
+            f.append(math.sqrt(tukey_biweight_loss(p2s,tdw)))
+
+        # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
+        for idx in range(len(self._nodes)):
+            dgi_se3 = matrices[idx]
+            for nidx in self._neighbor_look_up[self._nodes[0]]:
+               dgj_v =  np.append(self._nodes[nidx][1],1)
+               dgj_se3 = matrices[nidx]
+               diff = np.matmul(dgi_se3,dgj_v) - np.matmul(dgj_se3, dgj_v)
+               for i in range(3):
+                   f.append(math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
+
+        return np.array(f)
+    
     # Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
-    def warp(self, pos):
+    # Matrices: {dg_SE3} used for dual quaternion blending
+    def warp(self, pos, matrices, normal = None):
         pass
 
-    # Interpolate a se3 matrix from k-nearest nodes to pos. If locations are not given, search for k-nearest neighbors. 
-    def dq_blend(self, pos, locations=None):
+    # Interpolate a se3 matrix from k-nearest nodes to pos.
+    def dq_blend(self, pos, matrices):
         pass
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
     def marching_cubes(self):
-        self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf, level=0.1,allow_degenerate=False)  
-
+        self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
+                                                                                            level=0.1,
+                                                                                            allow_degenerate=False)  
     # Write the current warp field to file 
     def write_warp_field(self, path, filename):
         pass
