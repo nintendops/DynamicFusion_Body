@@ -76,7 +76,7 @@ class Fusion:
             self._neighbor_look_up.append(idx)
             
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
-    def updateTSDF(self, curr_tsdf, wmax = 1.0f):
+    def updateTSDF(self, curr_tsdf, wmax = 1.0):
         if self._opt_result is None:
             raise ValueError('TSDF update should be called after solve()')
 
