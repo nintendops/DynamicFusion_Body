@@ -60,3 +60,16 @@ def load_sdf(file_path, read_closest_points=False, verbose=False):
             closest_points = np.swapaxes(closest_points, 0, 2)
 
     return b_min, b_max, volume, closest_points
+
+
+# Compute correspondences between the canonical frame and the live frame. 
+'''
+param pts: an np array of surface points in the canonical frames
+param tsdf_canonical, tsdf_live: (res_x, res_y, res_z) volume containing signed distances
+return: an np array of corresponding surface points in the live frame. The index should match that of pts. 
+'''
+def find_correspondence(pts, tsdf_canonical, tsdf_live, method='closest-pts'):
+    if method == 'closest-pts':
+        pass
+    elif method == 'cnn':
+        pass
