@@ -17,6 +17,9 @@ fusion.update_graph()
 
 All input/output datatypes should be be numpy arrays.   
 
+TODO: 
+- also solve for a global rigid transformation (R,t) of the mesh! 
+
 '''
 
 import math
@@ -29,8 +32,12 @@ from skimage import measure
 from util import *
 
 class Fusion:
-    def __init__(self, tsdf, subsample_rate = 5.0, knn = 4):
+    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4):
+        if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
+            raise ValueError('Only accept 3D np array as tsdf')
+        
         self._tsdf = tsdf
+        self._tdist = abs(trunc_distance)
         self._knn = knn
         self._subsample_rate = subsample_rate
         self._nodes = []
@@ -64,16 +71,32 @@ class Fusion:
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
-
         for vert in self._vertices:
             pts, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
             
-    # Perform surface fusion for each voxel center with a tsdf query function for the live frame
+    # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
     def updateTSDF(self, curr_tsdf):
-        pass
+        if self._opt_result is None:
+            raise ValueError('TSDF update should be called after solve()')
 
-    # Update the deformation graph after new surafce vertices are found (easy)
+        if type(curr_tsdf) is not np.ndarray or curr_tsdf.ndim != 3:
+            raise ValueError('Only accept 3D np array as tsdf')
+        
+        if curr_tsdf.shape != self._tsdf.shape:
+            raise ValueError('live frame TSDF should match the size of canonical TSDF')
+        
+        it = np.nditer(self._tsdf, flags=['multi_index'])
+        while not it.finished:
+            tsdf_s = it[0]
+            pos = np.array(it.multi_index, dtype=np.float32)
+            tsdf_l = interpolate_tsdf(self.warp(pos), curr_tsdf)
+            if tsdf_l is not None:
+                pass
+
+            it.iternext()
+
+    # Update the deformation graph after new surafce vertices are found
     def update_graph(self):
         pass
 
@@ -114,14 +137,18 @@ class Fusion:
         matrices = x.reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
 
-        # Data Term
+        # Data Term        
         for idx in range(len(self._vertices)):
-            locations = self._neighbor_look_up[idx]
-            knn_matrices = [matrices[i] for i in locations]
-            vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, self._normals[idx])
-            p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-            f.append(math.sqrt(tukey_biweight_loss(p2s,tdw)))
-
+            try:
+                locations = self._neighbor_look_up[idx]
+                knn_matrices = [matrices[i] for i in locations]
+                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx])
+                p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
+                f.append(math.sqrt(tukey_biweight_loss(p2s,tdw)))
+            except IndexError:
+                print('Length of correspondences should equal length of surface vertices')
+                break
+                
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
             dgi_se3 = matrices[idx]
@@ -133,15 +160,52 @@ class Fusion:
                    f.append(math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
 
         return np.array(f)
-    
-    # Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
-    # Matrices: {dg_SE3} used for dual quaternion blending
-    def warp(self, pos, matrices, normal = None):
-        pass
 
+    '''
+    Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
+    params: 
+    matrices: {dg_SE3} used for dual quaternion blending
+    locations: indices for corresponding node in the graph.
+    normal: if provided, return a warped normal as well.
+    '''
+    def warp(self, pos, matrices = None, locations = None, normal = None, use_dgw = False):
+        dmax = None
+        if matrices is None or locations is None: 
+            pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
+            locations = kdidx[:-1]
+            matrices = [self._nodes[i][2] for i in locations]
+            if not use_dgw:
+                dmax = la.norm(pos - pts[-1])
+        elif not use_dgw:
+            pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
+            dmax = la.norm(pos - pts[-1])
+        
+        
+        se3 = self.dq_blend(pos,matrices,locations,dmax)
+        pos_warped = np.matmul(se3, np.append(pos,1))
+        if normal is not None:
+            normal_warped = np.matmul(se3, np.append(normal,0))
+            return (pos_warped,normal_warped)
+        else:
+            return pos_warped
+        
+    '''
+    Not sure how to determine dgw, so following idea from [Sumner 07] to calculate weights in DQB. 
+    The idea is to use the knn + 1 node as a denominator. 
+    '''
     # Interpolate a se3 matrix from k-nearest nodes to pos.
-    def dq_blend(self, pos, matrices):
-        pass
+    def dq_blend(self, pos, matrices, locations, dmax = None):
+        for idx in range(len(matrices)):
+            dg_idx, dg_v, dg_se3, dg_w = self._nodes[locations[idx]]
+            dg_dq = SE3TDQ(matrices[idx])
+            if dmax is None:
+                w = math.exp( -1 * (la.norm(pos - dg_v)/2*dg_w)**2)
+                dqb = dqb + w * dg_dq
+            else:
+                w = math.exp( -1 * (la.norm(pos - dg_v)/dmax)**2)
+                dqb = dqb + w * dg_dq
+
+        return DQTSE3(dqb / la.norm(dqb))
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
     def marching_cubes(self):
@@ -168,11 +232,4 @@ class Fusion:
         v3 = self._vertices[f[2]]
         return (cal_dist(v1,v2) + cal_dist(v1,v3) + cal_dist(v2,v3))/3
 
-    # Trilinear interpolation of signed distance 
-    def get_tsdf(self, x, y, z):
-        pass
-    
-# helper functions
-def cal_dist(a,b):
-    return la.norm(a-b)
 
