@@ -18,8 +18,8 @@ def weird_function(a, b=None):
         return 1
 
 TEST_INPUT = True
-TEST_FUSION_INITIALIZE = False
-TEST_UTIL = True
+TEST_FUSION = True
+TEST_UTIL = False
 TEST_WEIRD_STUFF = False
     
 if __name__ == "__main__":
@@ -34,9 +34,11 @@ if __name__ == "__main__":
 
     res_x, res_y, res_z = volume.shape
         
-    if TEST_FUSION_INITIALIZE:
+    if TEST_FUSION:
         # Generate a level set about zero of two identical ellipsoids in 3D
-        fus = Fusion(volume, volume.min())
+        fus = Fusion(volume, volume.min(), subsample_rate = 4.0, verbose = True)
+        print("Solving for a test iteration")
+        fus.solve(fus._vertices)
 
     if TEST_UTIL:
         # Testing DQ functions

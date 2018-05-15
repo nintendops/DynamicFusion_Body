@@ -23,24 +23,28 @@ def decompose_se3(M):
 # Radius-based spatial subsampling
 def uniform_sample(arr,radius):
     candidates = arr.copy()
+    locations = np.arange(len(candidates))
+    #for idx in range(len(arr)):
+    #    candidates.append((arr[idx],idx))
+
     result = []
-    locations = []
-    pointer = 0
+    result_idx = []
     
     while candidates.size > 0:
+        #print("current candidate size: %d"%(candidates.size))
         remove = []
-        rows = candidates.shape[0]
+        rows = len(candidates)
         sample = candidates[0]
         index = np.arange(rows).reshape(-1,1)
         dists = np.column_stack((index,candidates))
         result.append(sample)
-        locations.append(pointer)
+        result_idx.append(locations[0])
         for row in dists:
             if la.norm(row[1:] - sample) < radius:
                 remove.append(int(row[0]))
-                pointer = pointer + 1
         candidates = np.delete(candidates, remove, axis=0)
-    return np.array(result), np.array(locations)
+        locations = np.delete(locations, remove)
+    return np.array(result), np.array(result_idx)
 
 
 def huber_loss(x,c):

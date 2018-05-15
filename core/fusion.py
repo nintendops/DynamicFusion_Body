@@ -31,32 +31,45 @@ from scipy.sparse import lil_matrix
 from skimage import measure
 from .util import *
 
+
+
+
 class Fusion:
-    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4):
+    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, verbose = False):
         if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
             raise ValueError('Only 3D numpy array is accepted as tsdf')
-        
+
+        self._itercounter = 0
         self._tsdf = tsdf
         self._tsdfw = np.zeros(tsdf.shape)
         self._tdist = abs(trunc_distance)
+        self._lw = np.identity(4)
         self._knn = knn
         self._nodes = []
         self._neighbor_look_up = []
         self._correspondences = None
         self._kdtree = None
-        self._opt_result = None
+        self._verbose = verbose
 
+        if verbose:
+            print("Running initial marching cubes")
         self.marching_cubes()
         average_distances = []
         for f in self._faces:
             average_distances.append(self.average_edge_dist_in_face(f))
         self._radius = subsample_rate * np.average(np.array(average_distances))
+
+        if verbose:
+            print("Constructing initial graph...")
         self.construct_graph()
         
     # Construct deformation graph from canonical vertices (easy)
     def construct_graph(self):
         # uniform sampling
         nodes_v, nodes_idx = uniform_sample(self._vertices,self._radius)
+        if self._verbose:
+            print("%d deformation nodes sampled, with average radius of %f" % (len(nodes_v), self._radius))
+        
         '''
         Each node is a 4-tuple (index of corresponding surface vertex dg_idx, 3D position dg_v, 4x4 Transformation dg_se3, weight dg_w) 
         HackHack:
@@ -66,7 +79,7 @@ class Fusion:
             self._nodes.append((nodes_idx[i],
                                 nodes_v[i],
                                 np.identity(4),
-                                2*radius))
+                                2* self._radius))
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
@@ -77,8 +90,6 @@ class Fusion:
             
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
     def updateTSDF(self, curr_tsdf, wmax = 1.0):
-        if self._opt_result is None:
-            raise ValueError('TSDF update should be called after solve()')
 
         if type(curr_tsdf) is not np.ndarray or curr_tsdf.ndim != 3:
             raise ValueError('Only accept 3D np array as tsdf')
@@ -140,29 +151,77 @@ class Fusion:
     '''
     def solve(self, correspondences,
               tukey_data_weight =  0.01,
-              tukey_regularization_weight = 0.0001,
+              huber_regularization_weight = 0.0001,
               regularization_weight = 200):
         self._correspondences = correspondences
-        values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
-        # We may consider using other optimization library
-        self._opt_result = least_squares(computef,
-                                         values,
-                                         jac='3-point',
-                                         tr_solver='lsmr',
-                                         args=(tuky_data_weight, tukey_regularization_weight, regularization_weight))
+        self._itercounter += 1
 
+        values = np.append(self._lw.flatten(), np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten())
+        n = len(self._vertices) + 3 * self._knn * len(self._nodes)
+        
+        solver_verbose_level = 0
+        if self._verbose:
+            print("Optimizing warp field...")
+            solver_verbose_level = 2
+            
+        # We may consider using other optimization library
+        opt_result = least_squares(self.computef,
+                                         values,
+                                         jac='2-point',
+                                         ftol=1e-4,
+                                         tr_solver='lsmr',
+                                         jac_sparsity = self.computeSparsity(n, len(values)),
+                                         verbose = solver_verbose_level,
+                                         args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
+
+        # Results: (x, cost, fun, jac, grad, optimality)
+        new_values = opt_result.x
+        if self._verbose:
+            diff = la.norm(new_values - values)
+            print("Optimized cost at %d iteration: %f" % (self._itercounter, opt_result.cost))
+            print("Norm of displacement (total): %f; sum: %f" % (diff, (new_values - values).sum()))
+            
+        self._lw = new_values[:16].reshape(4,4)
+        matrices = new_values[16:].reshape(-1,4)
+        matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
+        for idx in range(len(self._nodes)):
+            self._nodes[idx][2] = matrices[idx]                  
+                
+        
     # TODO, Optional: we can compute a sparsity structure to greatly speed up the optimizer
-    def computeSparsity(self, n):
-        sparsity = lil_matrix((n,n), dtype=np.float32)
+    def computeSparsity(self, n, m):
+        sparsity = lil_matrix((n,m), dtype=np.float32)
         '''
         fill non-zero entries with 1
         '''
+        data_term_length = len(self._vertices)
+        
+        for idx in range(data_term_length):
+            locations = self._neighbor_look_up[idx]
+            for i in range(16):
+                sparsity[idx,i] = 1
+            for loc in locations:
+                for i in range(16):
+                    sparsity[idx, 16 * (loc + 1) + i] = 1
+
+        for idx in range(len(self._nodes)):
+            for i in range(16):
+                sparsity[data_term_length + 3*idx, 16 * (idx + 1) + i] = 1
+                sparsity[data_term_length + 3*idx + 1, 16 * (idx + 1) + i] = 1
+                sparsity[data_term_length + 3*idx + 2, 16 * (idx + 1) + i] = 1
+
+            for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
+                for i in range(16):
+                    sparsity[data_term_length + 3*idx, 16 * (nidx + 1) + i] = 1
+                    sparsity[data_term_length + 3*idx + 1, 16 * (nidx + 1) + i] = 1
+                    sparsity[data_term_length + 3*idx + 2, 16 * (nidx + 1) + i] = 1
         return sparsity
                                
     # Compute residual function. Input is a flattened vector {dg_SE3}
     def computef(self, x, tdw, trw, rw):
         f = []
-        matrices = x.reshape(-1,4)
+        m_lw = x[:16].reshape(4,4)
+        matrices = x[16:].reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
 
         # Data Term        
@@ -170,24 +229,28 @@ class Fusion:
             try:
                 locations = self._neighbor_look_up[idx]
                 knn_matrices = [matrices[i] for i in locations]
-                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx])
+                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)
                 p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-                f.append(math.sqrt(tukey_biweight_loss(p2s,tdw)))
+                f.append(math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
             except IndexError:
                 print('Length of correspondences should equal length of surface vertices')
                 break
-                
+
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
             dgi_se3 = matrices[idx]
-            for nidx in self._neighbor_look_up[self._nodes[0]]:
+            for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
                dgj_v =  np.append(self._nodes[nidx][1],1)
                dgj_se3 = matrices[nidx]
                diff = np.matmul(dgi_se3,dgj_v) - np.matmul(dgj_se3, dgj_v)
                for i in range(3):
                    f.append(math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
 
-        return np.array(f)
+        f = np.array(f)
+        if self._verbose:
+            print("Energy at current step: %f" % (la.norm(f)))
+        
+        return f
 
     '''
     Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
@@ -196,25 +259,27 @@ class Fusion:
     locations: indices for corresponding node in the graph.
     normal: if provided, return a warped normal as well.
     dmax: if provided, use to instead of dgw to calculate weights
+    m_lw: if provided, apply global rigid transformation
     '''
-    def warp(self, pos, matrices = None, locations = None, normal = None, dmax = None):
-        dmax = None
+    def warp(self, pos, matrices = None, locations = None, normal = None, dmax = None, m_lw = None):
         if matrices is None or locations is None: 
             pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
             locations = kdidx[:-1]
             matrices = [self._nodes[i][2] for i in locations]
-        elif not use_dgw:
-            pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
-            #dmax = la.norm(pos - pts[-1])
-        
         
         se3 = self.dq_blend(pos,matrices,locations,dmax)
+                  
         pos_warped = np.matmul(se3, np.append(pos,1))
+        if m_lw is not None:
+            pos_warped = np.matmul(m_lw, pos_warped)
+        
         if normal is not None:
             normal_warped = np.matmul(se3, np.append(normal,0))
-            return (pos_warped,normal_warped)
+            if m_lw is not None:
+                normal_warped = np.matmul(m_lw, normal_warped)
+            return (pos_warped[:3],normal_warped[:3])
         else:
-            return pos_warped
+            return pos_warped[:3]
         
     '''
     Not sure how to determine dgw, so following idea from [Sumner 07] to calculate weights in DQB. 
@@ -226,23 +291,30 @@ class Fusion:
             pts, locations = self._kdtree.query(pos, k=self._knn)
             matrices = [self._nodes[i][2] for i in locations]
 
+        dqb = np.zeros(8)
         for idx in range(len(matrices)):
             dg_idx, dg_v, dg_se3, dg_w = self._nodes[locations[idx]]
             dg_dq = SE3TDQ(matrices[idx])
             if dmax is None:
                 w = math.exp( -1 * (la.norm(pos - dg_v)/2*dg_w)**2)
-                dqb = dqb + w * dg_dq
+                dqb += w * dg_dq
             else:
                 w = math.exp( -1 * (la.norm(pos - dg_v)/dmax)**2)
-                dqb = dqb + w * dg_dq
+                dqb += w * dg_dq
+
+        if la.norm(dqb) <= 0.00001:
+            return np.identity(4)
 
         return DQTSE3(dqb / la.norm(dqb))
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
     def marching_cubes(self):
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
-                                                                                            level=0.1,
-                                                                                            allow_degenerate=False)  
+                                                                                            level=0,
+                                                                                            step_size = 2,
+                                                                                            allow_degenerate=False)
+        if self._verbose:
+            print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))
     # Write the current warp field to file 
     def write_warp_field(self, path, filename):
         pass
