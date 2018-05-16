@@ -36,9 +36,9 @@ if __name__ == "__main__":
         
     if TEST_FUSION:
         # Generate a level set about zero of two identical ellipsoids in 3D
-        fus = Fusion(volume, volume.min(), subsample_rate = 4.0, verbose = True)
+        fus = Fusion(volume, volume.min(), subsample_rate = 5.0, verbose = True)
         print("Solving for a test iteration")
-        fus.solve(fus._vertices)
+        fus.solve(fus._vertices + 0.1)
 
     if TEST_UTIL:
         # Testing DQ functions

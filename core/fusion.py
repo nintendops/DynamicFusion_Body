@@ -79,7 +79,7 @@ class Fusion:
             self._nodes.append((nodes_idx[i],
                                 nodes_v[i],
                                 np.identity(4),
-                                2* self._radius))
+                                2 * self._radius))
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
@@ -104,7 +104,7 @@ class Fusion:
             pts, kdidx = self._kdtree.query(pos, k=self._knn + 1)
             locations = kdidx[:-1]
             matrices = [self._nodes[i][2] for i in locations]            
-            tsdf_l = interpolate_tsdf(self.warp(pos, matrices, locations), curr_tsdf)
+            tsdf_l = interpolate_tsdf(self.warp(pos, matrices, locations, m_lw = self._lw), curr_tsdf)
             if tsdf_l is not None and tsdf_l > -1 * self._tdist:
                 wi = 0
                 wi_t = self._tsdfw[it.multi_index]
@@ -155,7 +155,8 @@ class Fusion:
               regularization_weight = 200):
         self._correspondences = correspondences
         self._itercounter += 1
-
+        self._opt_itercounter = 0
+        
         values = np.append(self._lw.flatten(), np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten())
         n = len(self._vertices) + 3 * self._knn * len(self._nodes)
         
@@ -167,6 +168,7 @@ class Fusion:
         # We may consider using other optimization library
         opt_result = least_squares(self.computef,
                                          values,
+                                         method='trf',
                                          jac='2-point',
                                          ftol=1e-4,
                                          tr_solver='lsmr',
@@ -184,8 +186,10 @@ class Fusion:
         self._lw = new_values[:16].reshape(4,4)
         matrices = new_values[16:].reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
+
         for idx in range(len(self._nodes)):
-            self._nodes[idx][2] = matrices[idx]                  
+            nd = self._nodes[idx]
+            self._nodes[idx] = (nd[0], nd[1], matrices[idx], nd[3])                  
                 
         
     # TODO, Optional: we can compute a sparsity structure to greatly speed up the optimizer
@@ -224,14 +228,22 @@ class Fusion:
         matrices = x[16:].reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
 
+        '''
+        for value in x:
+            f.append(value)
+        print(la.norm(np.array(f)))
+        return np.array(f)
+        '''
+
         # Data Term        
         for idx in range(len(self._vertices)):
             try:
                 locations = self._neighbor_look_up[idx]
                 knn_matrices = [matrices[i] for i in locations]
-                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)
+                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)                    
                 p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-                f.append(math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
+                f.append(p2s)
+                # f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
             except IndexError:
                 print('Length of correspondences should equal length of surface vertices')
                 break
@@ -244,12 +256,11 @@ class Fusion:
                dgj_se3 = matrices[nidx]
                diff = np.matmul(dgi_se3,dgj_v) - np.matmul(dgj_se3, dgj_v)
                for i in range(3):
-                   f.append(math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
+                   f.append(rw * 0.1 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
+                   #f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
 
         f = np.array(f)
-        if self._verbose:
-            print("Energy at current step: %f" % (la.norm(f)))
-        
+        self._opt_itercounter += 1
         return f
 
     '''
@@ -302,7 +313,8 @@ class Fusion:
                 w = math.exp( -1 * (la.norm(pos - dg_v)/dmax)**2)
                 dqb += w * dg_dq
 
-        if la.norm(dqb) <= 0.00001:
+        #Hackhack
+        if la.norm(dqb) == 0:
             return np.identity(4)
 
         return DQTSE3(dqb / la.norm(dqb))
@@ -311,7 +323,7 @@ class Fusion:
     def marching_cubes(self):
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
                                                                                             level=0,
-                                                                                            step_size = 2,
+                                                                                            step_size = 3,
                                                                                             allow_degenerate=False)
         if self._verbose:
             print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))

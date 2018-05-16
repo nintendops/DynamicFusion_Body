@@ -72,6 +72,16 @@ def DQTSE3(q):
     t = quaternion_multiply(2 * q[4:], quaternion_conjugate(q[:4]))
     return compose_se3(R,t[1:])
 
+def InitialSE3():
+    M = np.identity(4)
+    M[0,0] = 0.9
+    M[1,1] = 0.9
+    M[2,2] = 0.9
+    M[0,3] = 0.1
+    M[1,3] = 0.1
+    M[2,3] = 0.1
+    return M
+
 # Trilinear interpolation of signed distance. Return None if pos is out of the volume.
 def interpolate_tsdf(pos, tsdf):
     if tsdf.ndim != 3:
