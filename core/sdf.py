@@ -68,8 +68,94 @@ param pts: an np array of surface points in the canonical frames
 param tsdf_canonical, tsdf_live: (res_x, res_y, res_z) volume containing signed distances
 return: an np array of corresponding surface points in the live frame. The index should match that of pts. 
 '''
+
+
 def find_correspondence(pts, tsdf_canonical, tsdf_live, method='closest-pts'):
     if method == 'closest-pts':
         pass
     elif method == 'cnn':
         pass
+
+
+##############################
+# The following comes all CNN code
+
+import gl.glm as glm
+from gl.glrender import GLRenderer
+from meshutil import regularize_mesh, load_mesh
+from colorutil import distinct_colors, image_color2idx
+from net import DHBC
+import tensorflow as tf
+
+# Globally initialize a CNN sesseion
+print('Initialize network...')
+tf.Graph().as_default()
+dhbc = DHBC()
+input = tf.placeholder(tf.float32, [1, None, None, 1])
+feature = dhbc.forward(input)
+
+# Checkpoint
+checkpoint = 'models/model'
+print('Load checkpoit from {}...'.format(checkpoint))
+sess = tf.Session()
+sess.run(tf.global_variables_initializer())
+saver = tf.train.Saver(dhbc.feat_vars)
+saver.restore(sess, checkpoint)
+
+
+def compute_correspondence(vertices, faces, znear=1.0, zfar=3.5, max_swi=70, width=512, height=512, flipyz=False):
+    '''
+    Compute a correspondence vector for mesh (vertices, faces)
+    :param vertices: mesh vertices
+    :param faces: mesh faces
+    :param znear:
+    :param zfar:
+    :param max_swi:
+    :param width:
+    :param height:
+    :param flipyz:
+    :return: For each vertex a 16-digit correspondence vector. [N, 16]
+    '''
+    b = zfar * znear / (znear - zfar)
+    a = -b / znear
+
+    renderer = GLRenderer(b'generate_mesh_feature', (width, height), (0, 0), toTexture=True)
+    proj = glm.perspective(glm.radians(70), 1.0, znear, zfar)
+
+    vertices = regularize_mesh(vertices, flipyz)
+
+    faces = faces.reshape([faces.shape[0] * 3])
+    vertex_buffer = vertices[faces]
+    vertex_color = distinct_colors(vertices.shape[0])
+    vertex_color_buffer = (vertex_color[faces] / 255.0).astype(np.float32)
+
+    cnt = np.zeros([vertices.shape[0]], dtype=np.int32)
+    feat = np.zeros([vertices.shape[0], 16], dtype=np.float32)
+
+    swi = 35
+    dis = 200
+    for rot in range(0, 360, 15):
+        mod = glm.identity()
+        mod = glm.rotate(mod, glm.radians(swi - max_swi / 2), glm.vec3(0, 1, 0))
+        mod = glm.translate(mod, glm.vec3(0, 0, -dis / 100.0))
+        mod = glm.rotate(mod, glm.radians(rot), glm.vec3(0, 1, 0))
+        mvp = proj.dot(mod)
+
+        rgb, z = renderer.draw(vertex_buffer, vertex_color_buffer, mvp.T)
+
+        depth = ((zfar - b / (z - a)) / (zfar - znear) * 255).astype(np.uint8)
+        features = sess.run(feature, feed_dict={input: depth.reshape([1, 512, 512, 1])}).reshape([512, 512, 16])
+
+        vertex = image_color2idx(rgb)
+
+        mask = vertex > 0
+        vertex = vertex[mask]
+        features = features[mask]
+        for i in range(vertex.shape[0]):
+            cnt[vertex[i] - 1] += 1
+            feat[vertex[i] - 1] += features[i]
+
+    for i in range(vertices.shape[0]):
+        if cnt[i] > 0:
+            feat[i] /= cnt[i]
+    return feat
