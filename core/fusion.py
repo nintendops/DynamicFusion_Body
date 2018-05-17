@@ -11,7 +11,6 @@ To process a new frame, we need two things: tsdf of the new frame and correpondi
 
 fusion.solve(corr_to_current_frame)
 fusion.updateTSDF(tsdf_of_current_frame)
-fusion.marching_cubes()
 fusion.update_graph()
 
 
@@ -30,27 +29,33 @@ from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 from skimage import measure
 from .util import *
-
+from .sdf import *
 
 
 
 class Fusion:
-    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, verbose = False):
+    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, verbose = False, use_cnn = True):
         if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
             raise ValueError('Only 3D numpy array is accepted as tsdf')
 
         self._itercounter = 0
         self._tsdf = tsdf
+        self._curr_tsdf = None
         self._tsdfw = np.zeros(tsdf.shape)
         self._tdist = abs(trunc_distance)
         self._lw = np.identity(4)
         self._knn = knn
         self._nodes = []
         self._neighbor_look_up = []
-        self._correspondences = None
+        self._correspondences = []
         self._kdtree = None
         self._verbose = verbose
-
+        
+        if use_cnn:
+            self._feature, self._sess = cnnInitialize()
+        else:
+            self._feature, self._sess = None
+            
         if verbose:
             print("Running initial marching cubes")
         self.marching_cubes()
@@ -89,12 +94,18 @@ class Fusion:
             self._neighbor_look_up.append(idx)
             
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
-    def updateTSDF(self, curr_tsdf, wmax = 1.0):
+    def updateTSDF(self, curr_tsdf = None, wmax = 1.0):
 
-        if type(curr_tsdf) is not np.ndarray or curr_tsdf.ndim != 3:
+        if curr_tsdf is not None:
+            self._curr_tsdf = curr_tsdf
+        
+        if self._curr_tsdf is None:
+            raise ValueError('tsdf of live frame has not been loaded')
+            
+        if type(self._curr_tsdf) is not np.ndarray or curr_tsdf.ndim != 3:
             raise ValueError('Only accept 3D np array as tsdf')
         
-        if curr_tsdf.shape != self._tsdf.shape:
+        if self._curr_tsdf.shape != self._tsdf.shape:
             raise ValueError('live frame TSDF should match the size of canonical TSDF')
         
         it = np.nditer(self._tsdf, flags=['multi_index'], op_flags = ['readwrite'])
@@ -104,7 +115,7 @@ class Fusion:
             pts, kdidx = self._kdtree.query(pos, k=self._knn + 1)
             locations = kdidx[:-1]
             matrices = [self._nodes[i][2] for i in locations]            
-            tsdf_l = interpolate_tsdf(self.warp(pos, matrices, locations, m_lw = self._lw), curr_tsdf)
+            tsdf_l = interpolate_tsdf(self.warp(pos, matrices, locations, m_lw = self._lw), self._curr_tsdf)
             if tsdf_l is not None and tsdf_l > -1 * self._tdist:
                 wi = 0
                 wi_t = self._tsdfw[it.multi_index]
@@ -120,7 +131,7 @@ class Fusion:
         self.marching_cubes()
         unsupported_vert = []
         for vert in self._vertices:
-            pts, kdidx = self._kdtree.query(pos,k=self._knn)
+            pts, kdidx = self._kdtree.query(vert,k=self._knn)
             if min([ la.norm(self._nodes[idx][1] - vert)/self._nodes[idx][3] for idx in kdidx]) >= 1:
                 unsupported_vert.append(vert)
 
@@ -138,6 +149,28 @@ class Fusion:
             pts, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
             
+        # since fusion is complete at this point, delete current live frame data     
+        self._curr_tsdf = None
+        self._correspondences.clear()
+
+
+    def setupCorrespondences(self, curr_tsdf):
+        if self._sess is None:
+            # TODO
+            print('Using closest pts method for finding correspondences...')
+            return
+        
+        self._curr_tsdf = curr_tsdf
+        self._correspondences.clear()
+        lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf)
+        s_feats = compute_correspondence(self._feature, self._sess, self._vertices, self._faces)
+        l_feats = compute_correspondence(self._feature, self._sess, lverts,lfaces)
+        l_kdtree = KDTree(np.array(l_feats))
+        
+        for idx in range(len(s_feats)):
+            pts, iidx = l_kdtre.query(s_feats[idx])
+            self._correspondences.append(lverts[iidx[0]])
+        
 
     # Solve for a warp field {dg_SE} with correspondences to the live frame
     '''
@@ -149,11 +182,18 @@ class Fusion:
     Nonlinear least square problem. The paper solved it by Iterative Gauss-Newton with a Sparse Cholesky Solver.
     how about scipy.optimize.least_squares?    
     '''
-    def solve(self, correspondences,
+    def solve(self,
+              correspondences = None,
               tukey_data_weight =  0.01,
               huber_regularization_weight = 0.0001,
               regularization_weight = 200):
-        self._correspondences = correspondences
+
+        if correspondences is not None:
+            self._correspondences = correspondences
+        
+        if len(self._correspondences) != len(self._vertices):
+            raise ValueError("Please first call setupCorrespondences to compute point to point correspondences between canonical and live frame vertices!")
+
         self._itercounter += 1
         self._opt_itercounter = 0
         
@@ -164,8 +204,9 @@ class Fusion:
         if self._verbose:
             print("Optimizing warp field...")
             solver_verbose_level = 2
-            
+
         # We may consider using other optimization library
+        
         opt_result = least_squares(self.computef,
                                          values,
                                          method='trf',
@@ -190,9 +231,9 @@ class Fusion:
         for idx in range(len(self._nodes)):
             nd = self._nodes[idx]
             self._nodes[idx] = (nd[0], nd[1], matrices[idx], nd[3])                  
-                
+             
         
-    # TODO, Optional: we can compute a sparsity structure to greatly speed up the optimizer
+    # TODO, Optional: we can compute a sparsity structure to speed up the optimizer
     def computeSparsity(self, n, m):
         sparsity = lil_matrix((n,m), dtype=np.float32)
         '''
@@ -202,20 +243,20 @@ class Fusion:
         
         for idx in range(data_term_length):
             locations = self._neighbor_look_up[idx]
-            for i in range(16):
+            for i in range(12):
                 sparsity[idx,i] = 1
             for loc in locations:
-                for i in range(16):
+                for i in range(12):
                     sparsity[idx, 16 * (loc + 1) + i] = 1
 
         for idx in range(len(self._nodes)):
-            for i in range(16):
+            for i in range(12):
                 sparsity[data_term_length + 3*idx, 16 * (idx + 1) + i] = 1
                 sparsity[data_term_length + 3*idx + 1, 16 * (idx + 1) + i] = 1
                 sparsity[data_term_length + 3*idx + 2, 16 * (idx + 1) + i] = 1
 
             for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
-                for i in range(16):
+                for i in range(12):
                     sparsity[data_term_length + 3*idx, 16 * (nidx + 1) + i] = 1
                     sparsity[data_term_length + 3*idx + 1, 16 * (nidx + 1) + i] = 1
                     sparsity[data_term_length + 3*idx + 2, 16 * (nidx + 1) + i] = 1
@@ -227,13 +268,6 @@ class Fusion:
         m_lw = x[:16].reshape(4,4)
         matrices = x[16:].reshape(-1,4)
         matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
-
-        '''
-        for value in x:
-            f.append(value)
-        print(la.norm(np.array(f)))
-        return np.array(f)
-        '''
 
         # Data Term        
         for idx in range(len(self._vertices)):
@@ -320,10 +354,17 @@ class Fusion:
         return DQTSE3(dqb / la.norm(dqb))
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
-    def marching_cubes(self):
+    def marching_cubes(self, tsdf = None):
+        
+        if tsdf is not None:
+            return measure.marching_cubes_lewiner(tsdf,
+                                                  level=0,
+                                                  step_size = 6,
+                                                  allow_degenerate=False)
+
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
                                                                                             level=0,
-                                                                                            step_size = 3,
+                                                                                            step_size = 6,
                                                                                             allow_degenerate=False)
         if self._verbose:
             print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))

@@ -1,5 +1,5 @@
 # place all module imports here
-from .sdf import load_sdf
+from .sdf import *
 from .fusion import Fusion
 import os
 

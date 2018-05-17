@@ -1,4 +1,11 @@
 import numpy as np
+import os
+from .gl import glm as glm
+from .gl.glrender import GLRenderer
+from .meshutil import regularize_mesh, load_mesh
+from .colorutil import distinct_colors, image_color2idx
+from .net import DHBC
+import tensorflow as tf
 
 '''
   ***  Signed distance field file is binary. Format:
@@ -62,48 +69,30 @@ def load_sdf(file_path, read_closest_points=False, verbose=False):
     return b_min, b_max, volume, closest_points
 
 
-# Compute correspondences between the canonical frame and the live frame. 
-'''
-param pts: an np array of surface points in the canonical frames
-param tsdf_canonical, tsdf_live: (res_x, res_y, res_z) volume containing signed distances
-return: an np array of corresponding surface points in the live frame. The index should match that of pts. 
-'''
-
-
-def find_correspondence(pts, tsdf_canonical, tsdf_live, method='closest-pts'):
-    if method == 'closest-pts':
-        pass
-    elif method == 'cnn':
-        pass
-
-
 ##############################
 # The following comes all CNN code
 
-import gl.glm as glm
-from gl.glrender import GLRenderer
-from meshutil import regularize_mesh, load_mesh
-from colorutil import distinct_colors, image_color2idx
-from net import DHBC
-import tensorflow as tf
+def cnnInitialize():
+    # Globally initialize a CNN sesseion
+    print('Initialize network...')
+    tf.Graph().as_default()
+    dhbc = DHBC()
+    input = tf.placeholder(tf.float32, [1, None, None, 1])
+    feature = dhbc.forward(input)
 
-# Globally initialize a CNN sesseion
-print('Initialize network...')
-tf.Graph().as_default()
-dhbc = DHBC()
-input = tf.placeholder(tf.float32, [1, None, None, 1])
-feature = dhbc.forward(input)
+    path = os.path.dirname(os.path.abspath(__file__))
+    print(path)
+    
+    # Checkpoint
+    checkpoint = path + '/models/model'
+    print('Load checkpoit from {}...'.format(checkpoint))
+    sess = tf.Session()
+    sess.run(tf.global_variables_initializer())
+    saver = tf.train.Saver(dhbc.feat_vars)
+    saver.restore(sess, checkpoint)
+    return feature, sess
 
-# Checkpoint
-checkpoint = 'models/model'
-print('Load checkpoit from {}...'.format(checkpoint))
-sess = tf.Session()
-sess.run(tf.global_variables_initializer())
-saver = tf.train.Saver(dhbc.feat_vars)
-saver.restore(sess, checkpoint)
-
-
-def compute_correspondence(vertices, faces, znear=1.0, zfar=3.5, max_swi=70, width=512, height=512, flipyz=False):
+def compute_correspondence(feature, sess, vertices, faces, znear=1.0, zfar=3.5, max_swi=70, width=512, height=512, flipyz=False):
     '''
     Compute a correspondence vector for mesh (vertices, faces)
     :param vertices: mesh vertices
@@ -118,7 +107,7 @@ def compute_correspondence(vertices, faces, znear=1.0, zfar=3.5, max_swi=70, wid
     '''
     b = zfar * znear / (znear - zfar)
     a = -b / znear
-
+    
     renderer = GLRenderer(b'generate_mesh_feature', (width, height), (0, 0), toTexture=True)
     proj = glm.perspective(glm.radians(70), 1.0, znear, zfar)
 

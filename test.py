@@ -1,4 +1,6 @@
 import numpy as np
+import cProfile
+from sympy import *
 from numpy import linalg as la
 from skimage import measure
 from skimage.draw import ellipsoid
@@ -19,26 +21,57 @@ def weird_function(a, b=None):
 
 TEST_INPUT = True
 TEST_FUSION = True
+TEST_FUSION_DUMMY = False
 TEST_UTIL = False
 TEST_WEIRD_STUFF = False
-    
+
+
+def test_diff(r11,r12,r13,t1):
+    M = np.identity(4)
+    M[1] = np.array([r11,r12,r13,t1])
+    #M[2] = np.array([r11,r12,r13,t2])
+    #M[3] = np.array([r11,r12,r13,t3])
+    a = np.array([1,2,3,1])
+    return la.norm(np.matmul(M,a))
+
 if __name__ == "__main__":
 
     ellip_base = ellipsoid(6, 10, 16, levelset=True)
     volume = np.concatenate((ellip_base[:-1, ...], ellip_base[2:, ...]), axis=0)
-        
+
+    
+    if TEST_FUSION_DUMMY:
+        # Generate a level set about zero of two identical ellipsoids in 3D
+        fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
+        print("Solving for a test iteration")
+        fus.solve(fus._vertices + 0.01)
+        print("skip finding correspondence...")
+        print("Updating TSDF...")
+        fus.updateTSDF(volume)
+        print("Updating deformation graph...")
+        fus.update_graph()
+
+    
     if TEST_INPUT:
         sdf_filepath = DATA_PATH + '0000.dist'
         b_min, b_max, volume, closest_points = load_sdf(sdf_filepath, verbose=True)
+        sdf_filepath1 = DATA_PATH + '0001.dist'
+        b_min1, b_max1, volume1, closest_points1 = load_sdf(sdf_filepath1, verbose=True)
+        
+        res_x, res_y, res_z = volume.shape
         print("Shape of volume: (%d, %d, %d)" % volume.shape)
 
-    res_x, res_y, res_z = volume.shape
-        
-    if TEST_FUSION:
-        # Generate a level set about zero of two identical ellipsoids in 3D
-        fus = Fusion(volume, volume.min(), subsample_rate = 5.0, verbose = True)
-        print("Solving for a test iteration")
-        fus.solve(fus._vertices + 0.1)
+        if TEST_FUSION:
+            # Generate a level set about zero of two identical ellipsoids in 3D
+            fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
+            print("Setting up correspondences...")
+            fus.setupCorrespondences(volume1)
+            print("Solving for a test iteration")
+            fus.solve()
+            print("Updating TSDF...")
+            fus.updateTSDF()
+            print("Updating deformation graph...")
+            fus.update_graph()
 
     if TEST_UTIL:
         # Testing DQ functions

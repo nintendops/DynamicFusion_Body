@@ -22,7 +22,7 @@ def decompose_se3(M):
 
 # Radius-based spatial subsampling
 def uniform_sample(arr,radius):
-    candidates = arr.copy()
+    candidates = np.array(arr).copy()
     locations = np.arange(len(candidates))
     #for idx in range(len(arr)):
     #    candidates.append((arr[idx],idx))

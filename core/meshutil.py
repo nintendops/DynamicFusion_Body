@@ -1,5 +1,5 @@
 import numpy as np
-import gl.glm as glm
+from.gl import glm as glm
 
 
 def sqr_dist(src, dst):

@@ -84,7 +84,8 @@ class GLRenderer(object):
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.texDepth, 0)
 
         if not shaderPathList:
-            shaderPathList = [os.path.join('gl', sh) for sh in ['default.vs', 'default.gs', 'default.fs']]
+            dir_path = os.path.dirname(os.path.abspath(__file__)) 
+            shaderPathList = [os.path.join(dir_path, sh) for sh in ['default.vs', 'default.gs', 'default.fs']]
         # shaderPathList = [os.path.join('glhelper', sh) for sh in ['default.vs']]
         self.program = LoadProgram(shaderPathList)
         self.mvpMatrix = glGetUniformLocation(self.program, 'MVP')
