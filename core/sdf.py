@@ -90,9 +90,9 @@ def cnnInitialize():
     sess.run(tf.global_variables_initializer())
     saver = tf.train.Saver(dhbc.feat_vars)
     saver.restore(sess, checkpoint)
-    return feature, sess
+    return input, feature, sess
 
-def compute_correspondence(feature, sess, vertices, faces, znear=1.0, zfar=3.5, max_swi=70, width=512, height=512, flipyz=False):
+def compute_correspondence(input, feature, sess, vertices, faces, znear=1.0, zfar=3.5, max_swi=70, width=512, height=512, flipyz=False):
     '''
     Compute a correspondence vector for mesh (vertices, faces)
     :param vertices: mesh vertices
