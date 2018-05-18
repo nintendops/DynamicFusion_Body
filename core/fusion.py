@@ -168,7 +168,7 @@ class Fusion:
         l_kdtree = KDTree(np.array(l_feats))
         
         for idx in range(len(s_feats)):
-            pts, iidx = l_kdtre.query(s_feats[idx])
+            pts, iidx = l_kdtree.query(s_feats[idx])
             self._correspondences.append(lverts[iidx[0]])
         
 
