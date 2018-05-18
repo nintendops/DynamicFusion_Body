@@ -1,6 +1,6 @@
 *~
 #*
-*,pyc
+*.pyc
 __pycache__
 ENV/
 data/

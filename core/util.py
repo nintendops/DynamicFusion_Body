@@ -24,14 +24,11 @@ def decompose_se3(M):
 def uniform_sample(arr,radius):
     candidates = np.array(arr).copy()
     locations = np.arange(len(candidates))
-    #for idx in range(len(arr)):
-    #    candidates.append((arr[idx],idx))
 
     result = []
     result_idx = []
     
     while candidates.size > 0:
-        #print("current candidate size: %d"%(candidates.size))
         remove = []
         rows = len(candidates)
         sample = candidates[0]

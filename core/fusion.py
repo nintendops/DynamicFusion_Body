@@ -17,12 +17,15 @@ fusion.update_graph()
 All input/output datatypes should be be numpy arrays.   
 
 TODO: 
-- also solve for a global rigid transformation (R,t) of the mesh! 
+- optimizer is too slow. Most time spent on Jacobian estimation
+- (Optional) implement a closest point method for finding correspondence
 
 '''
 
 import math
 import numpy as np
+import pickle
+import os
 from numpy import linalg as la
 from scipy.spatial import KDTree
 from scipy.optimize import least_squares
@@ -30,11 +33,11 @@ from scipy.sparse import lil_matrix
 from skimage import measure
 from .util import *
 from .sdf import *
-
+from . import *
 
 
 class Fusion:
-    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, verbose = False, use_cnn = True):
+    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, marching_cubes_step_size = 3, verbose = False, use_cnn = True):
         if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
             raise ValueError('Only 3D numpy array is accepted as tsdf')
 
@@ -45,6 +48,7 @@ class Fusion:
         self._tdist = abs(trunc_distance)
         self._lw = np.identity(4)
         self._knn = knn
+        self._marching_cubes_step_size = marching_cubes_step_size
         self._nodes = []
         self._neighbor_look_up = []
         self._correspondences = []
@@ -151,7 +155,7 @@ class Fusion:
             
         # since fusion is complete at this point, delete current live frame data     
         self._curr_tsdf = None
-        self._correspondences.clear()
+        self._correspondences = []
 
 
     def setupCorrespondences(self, curr_tsdf):
@@ -161,14 +165,14 @@ class Fusion:
             return
         
         self._curr_tsdf = curr_tsdf
-        self._correspondences.clear()
+        self._correspondences = []
         lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf)
         s_feats = compute_correspondence(self._feature, self._sess, self._vertices, self._faces)
         l_feats = compute_correspondence(self._feature, self._sess, lverts,lfaces)
         l_kdtree = KDTree(np.array(l_feats))
         
         for idx in range(len(s_feats)):
-            pts, iidx = l_kdtre.query(s_feats[idx])
+            pts, iidx = l_kdtree.query(s_feats[idx])
             self._correspondences.append(lverts[iidx[0]])
         
 
@@ -195,7 +199,6 @@ class Fusion:
             raise ValueError("Please first call setupCorrespondences to compute point to point correspondences between canonical and live frame vertices!")
 
         self._itercounter += 1
-        self._opt_itercounter = 0
         
         values = np.append(self._lw.flatten(), np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten())
         n = len(self._vertices) + 3 * self._knn * len(self._nodes)
@@ -214,6 +217,7 @@ class Fusion:
                                          ftol=1e-4,
                                          tr_solver='lsmr',
                                          jac_sparsity = self.computeSparsity(n, len(values)),
+                                         max_nfev = 20,
                                          verbose = solver_verbose_level,
                                          args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
 
@@ -233,7 +237,7 @@ class Fusion:
             self._nodes[idx] = (nd[0], nd[1], matrices[idx], nd[3])                  
              
         
-    # TODO, Optional: we can compute a sparsity structure to speed up the optimizer
+    # Optional: we can compute a sparsity structure to speed up the optimizer
     def computeSparsity(self, n, m):
         sparsity = lil_matrix((n,m), dtype=np.float32)
         '''
@@ -271,16 +275,12 @@ class Fusion:
 
         # Data Term        
         for idx in range(len(self._vertices)):
-            try:
-                locations = self._neighbor_look_up[idx]
-                knn_matrices = [matrices[i] for i in locations]
-                vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)                    
-                p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-                f.append(p2s)
-                # f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
-            except IndexError:
-                print('Length of correspondences should equal length of surface vertices')
-                break
+            locations = self._neighbor_look_up[idx]
+            knn_matrices = [matrices[i] for i in locations]
+            vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)                    
+            p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
+            #f.append(p2s)
+            f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
 
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
@@ -290,12 +290,10 @@ class Fusion:
                dgj_se3 = matrices[nidx]
                diff = np.matmul(dgi_se3,dgj_v) - np.matmul(dgj_se3, dgj_v)
                for i in range(3):
-                   f.append(rw * 0.1 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
-                   #f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
+                   #f.append(rw * 0.1 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
+                   f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
 
-        f = np.array(f)
-        self._opt_itercounter += 1
-        return f
+        return np.array(f)
 
     '''
     Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
@@ -303,7 +301,7 @@ class Fusion:
     matrices: {dg_SE3} used for dual quaternion blending
     locations: indices for corresponding node in the graph.
     normal: if provided, return a warped normal as well.
-    dmax: if provided, use to instead of dgw to calculate weights
+    dmax: if provided, use the value instead of dgw to calculate weights
     m_lw: if provided, apply global rigid transformation
     '''
     def warp(self, pos, matrices = None, locations = None, normal = None, dmax = None, m_lw = None):
@@ -359,18 +357,20 @@ class Fusion:
         if tsdf is not None:
             return measure.marching_cubes_lewiner(tsdf,
                                                   level=0,
-                                                  step_size = 6,
+                                                  step_size = self._marching_cubes_step_size,
                                                   allow_degenerate=False)
 
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
                                                                                             level=0,
-                                                                                            step_size = 6,
+                                                                                            step_size = self._marching_cubes_step_size,
                                                                                             allow_degenerate=False)
         if self._verbose:
             print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))
+
     # Write the current warp field to file 
-    def write_warp_field(self, path, filename):
-        pass
+    def write_warp_field(self, filename):
+        file = open( os.path.join(DATA_PATH, filename + '__' + str(self._itercounter) + '.p'),'wb')
+        pickle.dump(self._nodes, file)
 
 
     # Write the canonical mesh to file 

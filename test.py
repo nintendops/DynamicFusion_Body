@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import cProfile
 from sympy import *
 from numpy import linalg as la
@@ -7,41 +8,22 @@ from skimage.draw import ellipsoid
 from core import *
 from core.util import *
 from core.transformation import random_rotation_matrix
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-
-# helper functions
-def cal_dist(a,b):
-    return la.norm(a-b)
-
-def weird_function(a, b=None):
-    if b is not None:
-        return (1,2)
-    else:
-        return 1
-
-TEST_INPUT = True
-TEST_FUSION = True
-TEST_FUSION_DUMMY = False
+TEST_INPUT = False
+TEST_FUSION = False
+TEST_FUSION_DUMMY = True
 TEST_UTIL = False
-TEST_WEIRD_STUFF = False
-
-
-def test_diff(r11,r12,r13,t1):
-    M = np.identity(4)
-    M[1] = np.array([r11,r12,r13,t1])
-    #M[2] = np.array([r11,r12,r13,t2])
-    #M[3] = np.array([r11,r12,r13,t3])
-    a = np.array([1,2,3,1])
-    return la.norm(np.matmul(M,a))
 
 if __name__ == "__main__":
 
+    # Generate a level set about zero of two identical ellipsoids in 3D
     ellip_base = ellipsoid(6, 10, 16, levelset=True)
     volume = np.concatenate((ellip_base[:-1, ...], ellip_base[2:, ...]), axis=0)
-
     
     if TEST_FUSION_DUMMY:
-        # Generate a level set about zero of two identical ellipsoids in 3D
+        
         fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
         print("Solving for a test iteration")
         fus.solve(fus._vertices + 0.01)
@@ -50,12 +32,33 @@ if __name__ == "__main__":
         fus.updateTSDF(volume)
         print("Updating deformation graph...")
         fus.update_graph()
+        
+        # Display resulting triangular mesh using Matplotlib. This can also be done
+        # with mayavi (see skimage.measure.marching_cubes_lewiner docstring).
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        # Fancy indexing: `verts[faces]` to generate a collection of triangles
+        verts, faces, ns, vs = measure.marching_cubes_lewiner(fus._tsdf,
+                                                  level=0,
+                                                  step_size = 1,
+                                                  allow_degenerate=False)
 
-    
+        mesh = Poly3DCollection(verts[faces])
+        mesh.set_edgecolor('k')
+        ax.add_collection3d(mesh)
+        ax.set_xlabel("x-axis: a = 6 per ellipsoid")
+        ax.set_ylabel("y-axis: b = 10")
+        ax.set_zlabel("z-axis: c = 16")
+        ax.set_xlim(0, 24)  # a = 6 (times two for 2nd ellipsoid)
+        ax.set_ylim(0, 20)  # b = 10
+        ax.set_zlim(0, 32)  # c = 16
+        plt.tight_layout()
+        plt.show()
+
     if TEST_INPUT:
-        sdf_filepath = DATA_PATH + '0000.dist'
+        sdf_filepath = os.path.join(DATA_PATH, '0000.dist')
         b_min, b_max, volume, closest_points = load_sdf(sdf_filepath, verbose=True)
-        sdf_filepath1 = DATA_PATH + '0001.dist'
+        sdf_filepath1 = os.path.join(DATA_PATH, '0001.dist')
         b_min1, b_max1, volume1, closest_points1 = load_sdf(sdf_filepath1, verbose=True)
         
         res_x, res_y, res_z = volume.shape
@@ -105,7 +108,3 @@ if __name__ == "__main__":
             print(interpolate_tsdf(posb2,volume))
             
 
-    if TEST_WEIRD_STUFF:
-        # Testing weird stuff
-        print(weird_function(1,1))
-        print(weird_function(1))
