@@ -56,9 +56,9 @@ class Fusion:
         self._verbose = verbose
         
         if use_cnn:
-            self._feature, self._sess = cnnInitialize()
+            self.input, self._feature, self._sess = cnnInitialize()
         else:
-            self._feature, self._sess = None
+            self.input, self._feature, self._sess = None
             
         if verbose:
             print("Running initial marching cubes")
@@ -167,8 +167,8 @@ class Fusion:
         self._curr_tsdf = curr_tsdf
         self._correspondences = []
         lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf)
-        s_feats = compute_correspondence(self._feature, self._sess, self._vertices, self._faces)
-        l_feats = compute_correspondence(self._feature, self._sess, lverts,lfaces)
+        s_feats = compute_correspondence(self.input, self._feature, self._sess, self._vertices, self._faces)
+        l_feats = compute_correspondence(self.input, self._feature, self._sess, lverts,lfaces)
         l_kdtree = KDTree(np.array(l_feats))
         
         for idx in range(len(s_feats)):
