@@ -48,7 +48,7 @@ class Fusion:
         self._curr_tsdf = None
         self._tsdfw = np.zeros(tsdf.shape)
         self._tdist = abs(trunc_distance)
-        self._lw = np.identity(4)
+        self._lw = np.array([1,0,0,0,0,0,0,0],dtype=np.float32)
         self._knn = knn
         self._marching_cubes_step_size = marching_cubes_step_size
         self._nodes = []
@@ -90,7 +90,7 @@ class Fusion:
         for i in range(len(nodes_v)):
             self._nodes.append((nodes_idx[i],
                                 nodes_v[i],
-                                np.identity(4),
+                                np.array([1,0,0,0,0,0,0,0],dtype=np.float32),
                                 2 * self._radius))
 
         # construct kd tree
@@ -290,75 +290,71 @@ class Fusion:
     # Compute residual function. Input is a flattened vector {dg_SE3}
     def computef(self, x, tdw, trw, rw):
         f = []
-        m_lw = x[:16].reshape(4,4)
-        matrices = x[16:].reshape(-1,4)
-        matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
+        dqs = np.split(x, 8)
 
         # Data Term        
         for idx in range(len(self._vertices)):
             locations = self._neighbor_look_up[idx]
-            knn_matrices = [matrices[i] for i in locations]
-            vert_warped, n_warped = self.warp(self._vertices[idx],knn_matrices, locations, self._normals[idx], m_lw = m_lw)                    
+            vert_warped, n_warped = self.warp(self._vertices[idx], dqs, locations, self._normals[idx], m_lw = m_lw)                    
             p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
             #f.append(p2s)
             f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
 
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
-            dgi_se3 = matrices[idx]
+            dq = dqs[idx]
             for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
                dgj_v =  np.append(self._nodes[nidx][1],1)
-               dgj_se3 = matrices[nidx]
-               diff = np.matmul(dgi_se3,dgj_v) - np.matmul(dgj_se3, dgj_v)
+               dgj_se3 = dqs[nidx]
+               diff = dqb_warp(dgi_se3,dgj_v) - dqb_warp(dgj_se3, dgj_v)
                for i in range(3):
                    #f.append(rw * 0.1 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
                    f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
-
         return np.array(f)
 
     '''
     Warp a point from canonical space to the current live frame, using the wrap field computed from t-1. No camera matrix needed.
     params: 
-    matrices: {dg_SE3} used for dual quaternion blending
+    dq: dual quaternions {dg_SE3} used for dual quaternion blending
     locations: indices for corresponding node in the graph.
     normal: if provided, return a warped normal as well.
     dmax: if provided, use the value instead of dgw to calculate weights
     m_lw: if provided, apply global rigid transformation
     '''
-    def warp(self, pos, matrices = None, locations = None, normal = None, dmax = None, m_lw = None):
-        if matrices is None or locations is None: 
+    def warp(self, pos, dqs = None, locations = None, normal = None, dmax = None, m_lw = None):
+        if dqs is None or locations is None: 
             pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
             locations = kdidx[:-1]
-            matrices = [self._nodes[i][2] for i in locations]
+            dqs = [self._nodes[i][2] for i in locations]
         
-        se3 = self.dq_blend(pos,matrices,locations,dmax)
+        se3 = self.dq_blend(pos,dqs,locations,dmax)
                   
-        pos_warped = np.matmul(se3, np.append(pos,1))
+        pos_warped = dqb_warp(se3,pos)
         if m_lw is not None:
-            pos_warped = np.matmul(m_lw, pos_warped)
+            pos_warped = dqb_warp(m_lw, pos_warped)
         
         if normal is not None:
-            normal_warped = np.matmul(se3, np.append(normal,0))
+            normal_warped = dqb_warp_normal(se3, normal)
             if m_lw is not None:
-                normal_warped = np.matmul(m_lw, normal_warped)
-            return (pos_warped[:3],normal_warped[:3])
+                normal_warped = dqb_warp_normal(m_lw, normal_warped)
+            return (pos_warped,normal_warped)
         else:
-            return pos_warped[:3]
+            return pos_warped
         
     '''
     Not sure how to determine dgw, so following idea from [Sumner 07] to calculate weights in DQB. 
     The idea is to use the knn + 1 node as a denominator. 
     '''
     # Interpolate a se3 matrix from k-nearest nodes to pos.
-    def dq_blend(self, pos, matrices = None, locations = None, dmax = None):
-        if matrices is None or locations is None: 
+    def dq_blend(self, pos, dqs = None, locations = None, dmax = None):
+        if dqs is None or locations is None: 
             pts, locations = self._kdtree.query(pos, k=self._knn)
-            matrices = [self._nodes[i][2] for i in locations]
+            dqs = [self._nodes[i][2] for i in locations]
 
         dqb = np.zeros(8)
-        for idx in range(len(matrices)):
+        for idx in range(len(dqs)):
             dg_idx, dg_v, dg_se3, dg_w = self._nodes[locations[idx]]
-            dg_dq = SE3TDQ(matrices[idx])
+            dg_dq = dqs[idx]
             if dmax is None:
                 w = math.exp( -1 * (la.norm(pos - dg_v)/2*dg_w)**2)
                 dqb += w * dg_dq
@@ -368,9 +364,10 @@ class Fusion:
 
         #Hackhack
         if la.norm(dqb) == 0:
-            return np.identity(4)
+            print('Really weird thing just happend!!!! blended dq is a zero vector')
+            return np.array([1,0,0,0,0,0,0,0],dtype=np.float32)
 
-        return DQTSE3(dqb / la.norm(dqb))
+        return dqb / la.norm(dqb)
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
     def marching_cubes(self, tsdf = None):

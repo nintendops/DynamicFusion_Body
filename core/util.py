@@ -59,6 +59,22 @@ def tukey_biweight_loss(x,c):
     else:
         return x * (1 - (x/c)**2)**2
 
+    
+'''
+Transform a 3D point directly with a dual quaternion. 
+A 3-vector (x,y,z) can be expresed by vq = 1 + epsilon(xi + yj + zk), or [1,0,0,0,0,x,y,z]
+The transformation of it by a dq is given by dq*v*(quaternion and dual conjugate of dq)
+'''
+def dqb_warp(dq, pos):
+    vq = np.array([1,0,0,0,0,pos[0],pos[1],pos[2]], dtype=np.float32)
+    dqv = dual_quaternion_multiply(dq,vq)
+    dqvdqc = dual_quaternion_multiply(dqv,dual_quaternion_conjugate(dq)) 
+    return dqvdqc[-3:]
+
+def dqb_warp_normal(dq,pos):
+    rq = np.append(dq[:4],[0,0,0,0])
+    return dqb_warp(rq,pos)
+
 # basis of the 8 vector dual quaternion is (1, i, j, k, e, ei, ej, ek)
 def SE3TDQ(M):
     R, t = decompose_se3(M)
@@ -252,6 +268,19 @@ def quaternion_multiply(quaternion1, quaternion0):
         -x1*z0 + y1*w0 + z1*x0 + w1*y0,
         x1*y0 - y1*x0 + z1*w0 + w1*z0], dtype=np.float64)
 
+'''
+Let q = qr + qd*eps
+q1*q2 = qr1*qr2 + (qr1*qd2 + qd1*qr2)epsilon
+'''
+def dual_quaternion_multiply(q1,q2):
+    qr1 = q1[:4]
+    qd1 = q1[4:]
+    qr2 = q2[:4]
+    qd2 = q2[4:]
+    qr = quaternion_multiply(qr1,qr2)
+    qd = quaternion_multiply(qr1,qd2) + quaternion_multiply(qd1,qr2)
+    return np.append(qr,qd)
+
 
 def quaternion_conjugate(quaternion):
     """Return conjugate of quaternion.
@@ -267,10 +296,12 @@ def quaternion_conjugate(quaternion):
     return q
 
 
-
-
-
-
+def dual_quaternion_conjugate(dquaternion):
+    dq = np.array(dquaternion, dtype=np.float64, copy=True)
+    np.negative(dq[4:],dq[4:])
+    np.negative(dq[5:],dq[5:])
+    np.negative(dq[1:4],dq[1:4])
+    return dq
 
 
 
