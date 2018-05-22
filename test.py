@@ -11,10 +11,27 @@ from core.transformation import random_rotation_matrix
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-TEST_INPUT = False
-TEST_FUSION = False
-TEST_FUSION_DUMMY = True
+TEST_INPUT = True
+TEST_FUSION = True
+TEST_FUSION_DUMMY = False
 TEST_UTIL = False
+
+def visualize(tsdf):
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    verts, faces, ns, vs = measure.marching_cubes_lewiner(tsdf,setp_size=1,allow_degenerate=False)
+    mesh = Poly3DCollection(verts[faces])
+    mesh.set_edgecolor('k')
+    ax.add_collection3d(mesh)
+    ax.set_xlabel("x-axis: a = 6 per ellipsoid")
+    ax.set_ylabel("y-axis: b = 10")
+    ax.set_zlabel("z-axis: c = 16")
+    ax.set_xlim(0, 24)  # a = 6 (times two for 2nd ellipsoid)
+    ax.set_ylim(0, 20)  # b = 10
+    ax.set_zlim(0, 32)  # c = 16
+    plt.tight_layout()
+    plt.show()
+    
 
 if __name__ == "__main__":
 
@@ -23,7 +40,6 @@ if __name__ == "__main__":
     volume = np.concatenate((ellip_base[:-1, ...], ellip_base[2:, ...]), axis=0)
     
     if TEST_FUSION_DUMMY:
-        
         fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
         print("Solving for a test iteration")
         fus.solve(fus._vertices + 0.01)
@@ -56,26 +72,35 @@ if __name__ == "__main__":
         plt.show()
 
     if TEST_INPUT:
-        sdf_filepath = os.path.join(DATA_PATH, '0000.dist')
+        sdf_filepath = os.path.join(DATA_PATH, '0000.64.dist')
         b_min, b_max, volume, closest_points = load_sdf(sdf_filepath, verbose=True)
-        sdf_filepath1 = os.path.join(DATA_PATH, '0001.dist')
-        b_min1, b_max1, volume1, closest_points1 = load_sdf(sdf_filepath1, verbose=True)
         
-        res_x, res_y, res_z = volume.shape
-        print("Shape of volume: (%d, %d, %d)" % volume.shape)
-
         if TEST_FUSION:
             # Generate a level set about zero of two identical ellipsoids in 3D
-            fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
-            print("Setting up correspondences...")
-            fus.setupCorrespondences(volume1)
-            print("Solving for a test iteration")
-            fus.solve()
-            print("Updating TSDF...")
-            fus.updateTSDF()
-            print("Updating deformation graph...")
-            fus.update_graph()
+            fus = Fusion(volume, volume.min(), subsample_rate = 3, marching_cubes_step_size = 3, verbose = True)
+            f_iter = 1
+            datas = os.listdir(DATA_PATH)
+            datas.sort()
 
+            for tfile in datas:
+                if f_iter > 15:
+                    break
+                if tfile.endswith('64.dist') and not tfile.endswith('0000.64.dist'):
+                    try:
+                        b_min1, b_max1, volume, closest_points1 = load_sdf(os.path.join(DATA_PATH,tfile), verbose=True)
+                        print("Processing iteration:", f_iter)
+                        print("New shape of volume: (%d, %d, %d)" % volume.shape)
+                        print("Setting up correspondences...")
+                        fus.setupCorrespondences(volume)
+                        cProfile.run('fus.solve()', 'profiles/solve_' + str(f_iter))
+                        print("Updating TSDF...")
+                        cProfile.run('fus.updateTSDF()','profiles/updateTSDF_' + str(f_iter))
+                        print("Updating deformation graph...")
+                        fus.update_graph()
+                        f_iter += 1
+                    except ValueError:
+                        break    
+            fus.write_canonical_mesh(DATA_PATH,'mesh.obj')
     if TEST_UTIL:
         # Testing DQ functions
         print('Testing DQ functions')
@@ -89,7 +114,6 @@ if __name__ == "__main__":
         print(q)
         print('converted back to matrix')
         print(DQTSE3(q))
-
         # Testing interpolation
         print('Testing tsdf trilinear interpolation')
         for i in range(3):

@@ -36,8 +36,10 @@ from .sdf import *
 from . import *
 
 
+DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'data')
+
 class Fusion:
-    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, marching_cubes_step_size = 3, verbose = False, use_cnn = True):
+    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, marching_cubes_step_size = 3, verbose = False, use_cnn = True, write_warpfield = True):
         if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
             raise ValueError('Only 3D numpy array is accepted as tsdf')
 
@@ -54,6 +56,7 @@ class Fusion:
         self._correspondences = []
         self._kdtree = None
         self._verbose = verbose
+        self._write_warpfield = write_warpfield
         
         if use_cnn:
             self.input, self._feature, self._sess = cnnInitialize()
@@ -104,14 +107,17 @@ class Fusion:
             self._curr_tsdf = curr_tsdf
         
         if self._curr_tsdf is None:
-            raise ValueError('tsdf of live frame has not been loaded')
-            
-        if type(self._curr_tsdf) is not np.ndarray or curr_tsdf.ndim != 3:
+            raise ValueError('tsdf of live frame has not been loaded')            
+        if type(self._curr_tsdf) is not np.ndarray:
             raise ValueError('Only accept 3D np array as tsdf')
-        
+        elif self._curr_tsdf.ndim != 3:
+            raise ValueError('Only accept 3D np array as tsdf')
+
+        '''
         if self._curr_tsdf.shape != self._tsdf.shape:
             raise ValueError('live frame TSDF should match the size of canonical TSDF')
-        
+        '''
+    
         it = np.nditer(self._tsdf, flags=['multi_index'], op_flags = ['readwrite'])
         while not it.finished:
             tsdf_s = it[0]
@@ -133,6 +139,15 @@ class Fusion:
     # Update the deformation graph after new surafce vertices are found
     def update_graph(self):
         self.marching_cubes()
+        # update topology of existing nodes
+        vert_kdtree = KDTree(self._vertices)
+        for i in range(len(self._nodes)):
+            pos = self._nodes[i][1]
+            se3 = self._nodes[i][2]
+            pt, vidx = vert_kdtree.query(pos)
+            self._nodes[i] = (vidx, pos, se3, 2*self._radius)
+
+        # find unsupported surface points
         unsupported_vert = []
         for vert in self._vertices:
             pts, kdidx = self._kdtree.query(vert,k=self._knn)
@@ -156,6 +171,9 @@ class Fusion:
         # since fusion is complete at this point, delete current live frame data     
         self._curr_tsdf = None
         self._correspondences = []
+        if self._write_warpfield:
+            self.write_warp_field(DATA_PATH, 'test')
+        
 
 
     def setupCorrespondences(self, curr_tsdf):
@@ -173,7 +191,7 @@ class Fusion:
         
         for idx in range(len(s_feats)):
             pts, iidx = l_kdtree.query(s_feats[idx])
-            self._correspondences.append(lverts[iidx[0]])
+            self._correspondences.append(lverts[iidx])
         
 
     # Solve for a warp field {dg_SE} with correspondences to the live frame
@@ -244,6 +262,7 @@ class Fusion:
         fill non-zero entries with 1
         '''
         data_term_length = len(self._vertices)
+
         
         for idx in range(data_term_length):
             locations = self._neighbor_look_up[idx]
@@ -264,8 +283,10 @@ class Fusion:
                     sparsity[data_term_length + 3*idx, 16 * (nidx + 1) + i] = 1
                     sparsity[data_term_length + 3*idx + 1, 16 * (nidx + 1) + i] = 1
                     sparsity[data_term_length + 3*idx + 2, 16 * (nidx + 1) + i] = 1
+        
+        
         return sparsity
-                               
+
     # Compute residual function. Input is a flattened vector {dg_SE3}
     def computef(self, x, tdw, trw, rw):
         f = []
@@ -356,27 +377,32 @@ class Fusion:
         
         if tsdf is not None:
             return measure.marching_cubes_lewiner(tsdf,
-                                                  level=0,
                                                   step_size = self._marching_cubes_step_size,
                                                   allow_degenerate=False)
 
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
-                                                                                            level=0,
                                                                                             step_size = self._marching_cubes_step_size,
                                                                                             allow_degenerate=False)
         if self._verbose:
             print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))
 
     # Write the current warp field to file 
-    def write_warp_field(self, filename):
-        file = open( os.path.join(DATA_PATH, filename + '__' + str(self._itercounter) + '.p'),'wb')
+    def write_warp_field(self, path, filename):
+        file = open( os.path.join(path, filename + '__' + str(self._itercounter) + '.p'),'wb')
         pickle.dump(self._nodes, file)
 
 
     # Write the canonical mesh to file 
-    def write_canonical_mesh(self,path,filename):
-        pass
-
+    def write_canonical_mesh(self, path, filename):
+        fpath = open(os.path.join(path,filename),'w')
+        verts, faces, normals, values = measure.marching_cubes_lewiner(self._tsdf, allow_degenerate=False)
+        for v in verts:
+            fpath.write('v %f %f %f\n'%(v[0],v[1],v[2]))
+        for n in normals:
+            fpath.write('vn %f %f %f\n'%(n[0],n[1],n[2]))
+        for f in faces:
+            fpath.write('f %d %d %d\n'%(f[0],f[1],f[2]))
+        fpath.close()
 
     # Process a warp field file and write the live frame mesh
     def write_live_frame_mesh(self,path,filename, warpfield_path):
