@@ -246,13 +246,12 @@ class Fusion:
             print("Optimized cost at %d iteration: %f" % (self._itercounter, opt_result.cost))
             print("Norm of displacement (total): %f; sum: %f" % (diff, (new_values - values).sum()))
             
-        self._lw = new_values[:16].reshape(4,4)
-        matrices = new_values[16:].reshape(-1,4)
-        matrices = np.split(matrices, matrices.shape[0]/4, axis=0)
+        self._lw = new_values[:8]
+        nw_dqs = np.split(new_values[8:],len(new_values[8:])/8)
 
         for idx in range(len(self._nodes)):
             nd = self._nodes[idx]
-            self._nodes[idx] = (nd[0], nd[1], matrices[idx], nd[3])                  
+            self._nodes[idx] = (nd[0], nd[1], nw_dqs[idx], nd[3])                  
              
         
     # Optional: we can compute a sparsity structure to speed up the optimizer
@@ -266,23 +265,23 @@ class Fusion:
         
         for idx in range(data_term_length):
             locations = self._neighbor_look_up[idx]
-            for i in range(12):
+            for i in range(8):
                 sparsity[idx,i] = 1
             for loc in locations:
-                for i in range(12):
-                    sparsity[idx, 16 * (loc + 1) + i] = 1
+                for i in range(8):
+                    sparsity[idx, 8 * (loc + 1) + i] = 1
 
         for idx in range(len(self._nodes)):
-            for i in range(12):
-                sparsity[data_term_length + 3*idx, 16 * (idx + 1) + i] = 1
-                sparsity[data_term_length + 3*idx + 1, 16 * (idx + 1) + i] = 1
-                sparsity[data_term_length + 3*idx + 2, 16 * (idx + 1) + i] = 1
+            for i in range(8):
+                sparsity[data_term_length + 3*idx, 8 * (idx + 1) + i] = 1
+                sparsity[data_term_length + 3*idx + 1, 8 * (idx + 1) + i] = 1
+                sparsity[data_term_length + 3*idx + 2, 8 * (idx + 1) + i] = 1
 
             for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
-                for i in range(12):
-                    sparsity[data_term_length + 3*idx, 16 * (nidx + 1) + i] = 1
-                    sparsity[data_term_length + 3*idx + 1, 16 * (nidx + 1) + i] = 1
-                    sparsity[data_term_length + 3*idx + 2, 16 * (nidx + 1) + i] = 1
+                for i in range(8):
+                    sparsity[data_term_length + 3*idx, 8 * (nidx + 1) + i] = 1
+                    sparsity[data_term_length + 3*idx + 1, 8 * (nidx + 1) + i] = 1
+                    sparsity[data_term_length + 3*idx + 2, 8 * (nidx + 1) + i] = 1
         
         
         return sparsity
@@ -290,21 +289,23 @@ class Fusion:
     # Compute residual function. Input is a flattened vector {dg_SE3}
     def computef(self, x, tdw, trw, rw):
         f = []
-        dqs = np.split(x, 8)
+        m_lw = x[:8]
+        dqs = np.split(x[8:], len(x[8:])/8)
 
         # Data Term        
         for idx in range(len(self._vertices)):
             locations = self._neighbor_look_up[idx]
-            vert_warped, n_warped = self.warp(self._vertices[idx], dqs, locations, self._normals[idx], m_lw = m_lw)                    
+            knn_dqs = [dqs[i] for i in locations]
+            vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = m_lw)                    
             p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
             #f.append(p2s)
             f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
 
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
-            dq = dqs[idx]
+            dgi_se3 = dqs[idx]
             for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
-               dgj_v =  np.append(self._nodes[nidx][1],1)
+               dgj_v =  self._nodes[nidx][1]
                dgj_se3 = dqs[nidx]
                diff = dqb_warp(dgi_se3,dgj_v) - dqb_warp(dgj_se3, dgj_v)
                for i in range(3):
@@ -356,15 +357,22 @@ class Fusion:
             dg_idx, dg_v, dg_se3, dg_w = self._nodes[locations[idx]]
             dg_dq = dqs[idx]
             if dmax is None:
-                w = math.exp( -1 * (la.norm(pos - dg_v)/2*dg_w)**2)
+                w = math.exp( -1.0 * (la.norm(pos - dg_v)/(2*dg_w))**2)
                 dqb += w * dg_dq
+                if w == 0:
+                    print("Zero weight???? norm/dmax", la.norm(pos-dg_v), dg_w)
             else:
-                w = math.exp( -1 * (la.norm(pos - dg_v)/dmax)**2)
+                w = math.exp( -1.0 * (la.norm(pos - dg_v)/dmax)**2)
                 dqb += w * dg_dq
+                if w == 0:
+                    print("Zero weight???? norm/dmax", la.norm(pos-dg_v), dmax)
 
+                
         #Hackhack
         if la.norm(dqb) == 0:
             print('Really weird thing just happend!!!! blended dq is a zero vector')
+            print('dqs:', dqs)
+            print('locations:', locations)
             return np.array([1,0,0,0,0,0,0,0],dtype=np.float32)
 
         return dqb / la.norm(dqb)

@@ -1,7 +1,6 @@
 import numpy as np
 import os
 import cProfile
-from sympy import *
 from numpy import linalg as la
 from skimage import measure
 from skimage.draw import ellipsoid
@@ -78,12 +77,12 @@ if __name__ == "__main__":
         if TEST_FUSION:
             # Generate a level set about zero of two identical ellipsoids in 3D
             fus = Fusion(volume, volume.min(), subsample_rate = 3, marching_cubes_step_size = 3, verbose = True)
+            fus.write_canonical_mesh(DATA_PATH, 'original.obj')
             f_iter = 1
             datas = os.listdir(DATA_PATH)
             datas.sort()
-
             for tfile in datas:
-                if f_iter > 15:
+                if f_iter > 5:
                     break
                 if tfile.endswith('64.dist') and not tfile.endswith('0000.64.dist'):
                     try:
@@ -98,9 +97,11 @@ if __name__ == "__main__":
                         print("Updating deformation graph...")
                         fus.update_graph()
                         f_iter += 1
-                    except ValueError:
+                    except NameError as e:
+                        print(str(e))
                         break    
             fus.write_canonical_mesh(DATA_PATH,'mesh.obj')
+            
     if TEST_UTIL:
         # Testing DQ functions
         print('Testing DQ functions')
