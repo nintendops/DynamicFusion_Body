@@ -4,5 +4,6 @@
 __pycache__
 ENV/
 data/
+data_backup/
 core/models/*
 

@@ -48,7 +48,7 @@ class Fusion:
         self._curr_tsdf = None
         self._tsdfw = np.zeros(tsdf.shape)
         self._tdist = abs(trunc_distance)
-        self._lw = np.array([1,0,0,0,0,0,0,0],dtype=np.float32)
+        self._lw = np.array([1,0,0,0,0,0.1,0,0],dtype=np.float32)
         self._knn = knn
         self._marching_cubes_step_size = marching_cubes_step_size
         self._nodes = []
@@ -75,7 +75,7 @@ class Fusion:
             print("Constructing initial graph...")
         self.construct_graph()
         
-    # Construct deformation graph from canonical vertices (easy)
+    # Construct deformation graph from canonical vertices
     def construct_graph(self):
         # uniform sampling
         nodes_v, nodes_idx = uniform_sample(self._vertices,self._radius)
@@ -90,18 +90,34 @@ class Fusion:
         for i in range(len(nodes_v)):
             self._nodes.append((nodes_idx[i],
                                 nodes_v[i],
-                                np.array([1,0,0,0,0,0,0,0],dtype=np.float32),
+                                np.array([1,0.00,0.00,0.00,0.00,0.01,0.01,0.00],dtype=np.float32),
                                 2 * self._radius))
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
         self._neighbor_look_up.clear()
         for vert in self._vertices:
-            pts, idx = self._kdtree.query(vert, k=self._knn)
+            dists, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
-            
+
+        # initialize weight
+        if self._verbose:
+            print('initializing weight...')
+        it = np.nditer(self._tsdf, flags=['multi_index'], op_flags = ['readwrite'])
+        while not it.finished:
+            tsdf_s = it[0]
+            pos = np.array(it.multi_index, dtype=np.float32)
+            dists, locations = self._kdtree.query(pos, k=self._knn)
+            if tsdf_s > -1 * self._tdist:
+                wi = 0
+                for idx in locations:
+                    wi += la.norm(self._nodes[idx][1] - pos) / len(locations)
+                self._tsdfw[it.multi_index] = wi
+            it.iternext()
+
+        
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
-    def updateTSDF(self, curr_tsdf = None, wmax = 1.0):
+    def updateTSDF(self, curr_tsdf = None, wmax = 100.0):
 
         if curr_tsdf is not None:
             self._curr_tsdf = curr_tsdf
@@ -117,12 +133,13 @@ class Fusion:
         if self._curr_tsdf.shape != self._tsdf.shape:
             raise ValueError('live frame TSDF should match the size of canonical TSDF')
         '''
-    
+        itest = 0
+        
         it = np.nditer(self._tsdf, flags=['multi_index'], op_flags = ['readwrite'])
         while not it.finished:
-            tsdf_s = it[0]
+            tsdf_s = np.copy(it[0])
             pos = np.array(it.multi_index, dtype=np.float32)
-            pts, kdidx = self._kdtree.query(pos, k=self._knn + 1)
+            dists, kdidx = self._kdtree.query(pos, k=self._knn + 1)
             locations = kdidx[:-1]
             matrices = [self._nodes[i][2] for i in locations]            
             tsdf_l = interpolate_tsdf(self.warp(pos, matrices, locations, m_lw = self._lw), self._curr_tsdf)
@@ -130,10 +147,17 @@ class Fusion:
                 wi = 0
                 wi_t = self._tsdfw[it.multi_index]
                 for idx in locations:
-                    wi = wi + la.norm(self._nodes[idx][1] - pos) / len(locations)
+                    wi += la.norm(self._nodes[idx][1] - pos) / len(locations)
                 # Update (v(x),w(x))
                 it[0] = (it[0] * wi_t + min(self._tdist, tsdf_l)*wi)/(wi + wi_t)
-                self._tsdfw[it.multi_index] = min(wi + wi_t, wmax)                
+                self._tsdfw[it.multi_index] = min(wi + wi_t, wmax)
+
+                if itest % 250 == 0 and itest < 5000:
+                    print('original tsdf and weight: (%f,%f). new tsdf and weight: (%f,%f)'%(tsdf_s, wi_t, it[0], min(wi + wi_t, wmax)))
+                    print('interpolated tsdf at warp location:',tsdf_l)
+                    print('new weight vs original weight:',wi,wi_t)
+                
+            itest += 1
             it.iternext()
 
     # Update the deformation graph after new surafce vertices are found
@@ -144,13 +168,13 @@ class Fusion:
         for i in range(len(self._nodes)):
             pos = self._nodes[i][1]
             se3 = self._nodes[i][2]
-            pt, vidx = vert_kdtree.query(pos)
+            dist, vidx = vert_kdtree.query(pos)
             self._nodes[i] = (vidx, pos, se3, 2*self._radius)
 
         # find unsupported surface points
         unsupported_vert = []
         for vert in self._vertices:
-            pts, kdidx = self._kdtree.query(vert,k=self._knn)
+            dists, kdidx = self._kdtree.query(vert,k=self._knn)
             if min([ la.norm(self._nodes[idx][1] - vert)/self._nodes[idx][3] for idx in kdidx]) >= 1:
                 unsupported_vert.append(vert)
 
@@ -161,11 +185,14 @@ class Fusion:
                                 self.dq_blend(nodes_new_v[i]),
                                 2 * self._radius))
 
+        if self._verbose:
+            print("Inserted %d new deformation nodes. Current number of deformation nodes: %d" % (len(nodes_new_v), len(self._nodes)))
+            
         # recompute KDTree and neighbors
         self._kdtree = KDTree(np.array([n[1] for n in self._nodes]))
         self._neighbor_look_up.clear()
         for vert in self._vertices:
-            pts, idx = self._kdtree.query(vert, k=self._knn)
+            dists, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
             
         # since fusion is complete at this point, delete current live frame data     
@@ -176,22 +203,49 @@ class Fusion:
         
 
 
-    def setupCorrespondences(self, curr_tsdf):
-        if self._sess is None:
-            # TODO
-            print('Using closest pts method for finding correspondences...')
-            return
-        
+    def setupCorrespondences(self, curr_tsdf, method = 'cnn'):
         self._curr_tsdf = curr_tsdf
         self._correspondences = []
-        lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf)
-        s_feats = compute_correspondence(self.input, self._feature, self._sess, self._vertices, self._faces)
-        l_feats = compute_correspondence(self.input, self._feature, self._sess, lverts,lfaces)
-        l_kdtree = KDTree(np.array(l_feats))
+        lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf, step_size = 1)
+
+        print('lverts shape:',lverts.shape)
         
-        for idx in range(len(s_feats)):
-            pts, iidx = l_kdtree.query(s_feats[idx])
-            self._correspondences.append(lverts[iidx])
+        if self._sess is None or method == 'clpts':
+            if self._verbose:
+                print('Using closest pts method for finding correspondences...')
+            
+            l_kdtree = KDTree(lverts)
+            i = 0
+            
+            for idx in range(len(self._vertices)):
+                locations = self._neighbor_look_up[idx]
+                knn_dqs = [self._nodes[i][2] for i in locations]
+                v_warped, n_warped = self.warp(self._vertices[idx],knn_dqs,locations,self._normals[idx],m_lw = self._lw)
+                dists, iidx = l_kdtree.query(v_warped,k=self._knn)
+                best_pt = lverts[iidx[0]]
+                best_cost = 1.0
+                
+                for idx in iidx:
+                    p = lverts[idx]
+                    cost = abs(np.dot(n_warped, v_warped - p))
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_pt = p
+                if best_cost >= 1.0:
+                    i+=1
+                self._correspondences.append(best_pt)
+
+            if self._verbose:
+                print('rate of overly large cost', float(i)/float(len(self._vertices)))
+        else:
+            if self._verbose:
+                print('Using cnn method for finding correspondences...')
+            s_feats = compute_correspondence(self.input, self._feature, self._sess, self._vertices, self._faces)
+            l_feats = compute_correspondence(self.input, self._feature, self._sess, lverts,lfaces)
+            l_kdtree = KDTree(np.array(l_feats))        
+            for idx in range(len(s_feats)):
+                dists, iidx = l_kdtree.query(s_feats[idx])
+                self._correspondences.append(lverts[iidx])
         
 
     # Solve for a warp field {dg_SE} with correspondences to the live frame
@@ -206,54 +260,70 @@ class Fusion:
     '''
     def solve(self,
               correspondences = None,
-              tukey_data_weight =  0.01,
-              huber_regularization_weight = 0.0001,
+              method = 'cnn',
+              precompute_lw = True,
+              tukey_data_weight =  0.2,
+              huber_regularization_weight = 0.001,
               regularization_weight = 200):
 
         if correspondences is not None:
             self._correspondences = correspondences
-        
-        if len(self._correspondences) != len(self._vertices):
-            raise ValueError("Please first call setupCorrespondences to compute point to point correspondences between canonical and live frame vertices!")
+            if len(self._correspondences) != len(self._vertices):
+                raise ValueError("Please first call setupCorrespondences to compute point to point correspondences between canonical and live frame vertices!")
+
+        iteration = 1
+        if method == 'clpts':
+            iteration = 2
 
         self._itercounter += 1
-        
-        values = np.append(self._lw.flatten(), np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten())
-        n = len(self._vertices) + 3 * self._knn * len(self._nodes)
-        
         solver_verbose_level = 0
         if self._verbose:
             print("Optimizing warp field...")
             solver_verbose_level = 2
 
         # We may consider using other optimization library
-        
-        opt_result = least_squares(self.computef,
-                                         values,
-                                         method='trf',
-                                         jac='2-point',
-                                         ftol=1e-4,
-                                         tr_solver='lsmr',
-                                         jac_sparsity = self.computeSparsity(n, len(values)),
-                                         max_nfev = 20,
-                                         verbose = solver_verbose_level,
-                                         args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
+        if precompute_lw:
+            if self._verbose:
+                print('estimating global transformation lw')
+                
+            for iter in range(iteration):
+                if iter > 0 and correspondences is None:
+                    self.setupCorrespondences(self._curr_tsdf, method = 'clpts')
 
-        # Results: (x, cost, fun, jac, grad, optimality)
-        new_values = opt_result.x
-        if self._verbose:
-            diff = la.norm(new_values - values)
-            print("Optimized cost at %d iteration: %f" % (self._itercounter, opt_result.cost))
-            print("Norm of displacement (total): %f; sum: %f" % (diff, (new_values - values).sum()))
+                values = self._lw
+                opt_result = least_squares(self.computef_lw, values, verbose=solver_verbose_level, args=(tukey_data_weight, 1))
+                self._lw = opt_result.x
+        
+        for iter in range(iteration):
+            values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
+            n = len(self._vertices) + 3 * self._knn * len(self._nodes)
+                    
+            if iter > 0 and correspondences is None:
+                self.setupCorrespondences(self._curr_tsdf, method = 'clpts')
+                                          
+            opt_result = least_squares(self.computef,
+                                       values,
+                                       method='trf',
+                                       jac='2-point',
+                                       ftol=1e-5,
+                                       tr_solver='lsmr',
+                                       jac_sparsity = self.computeSparsity(n, len(values)),
+                                       max_nfev = 100,
+                                       verbose = solver_verbose_level,
+                                       args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
+            # Results: (x, cost, fun, jac, grad, optimality)
+            new_values = opt_result.x
+            if self._verbose:
+                diff = la.norm(new_values - values)
+                print("Optimized cost at %d iteration: %f" % (self._itercounter, opt_result.cost))
+                print("Norm of displacement (total): %f; sum: %f" % (diff, (new_values - values).sum()))
             
-        self._lw = new_values[:8]
-        nw_dqs = np.split(new_values[8:],len(new_values[8:])/8)
-
-        for idx in range(len(self._nodes)):
-            nd = self._nodes[idx]
-            self._nodes[idx] = (nd[0], nd[1], nw_dqs[idx], nd[3])                  
+            nw_dqs = np.split(new_values,len(new_values)/8)
+            for idx in range(len(self._nodes)):
+                nd = self._nodes[idx]
+                self._nodes[idx] = (nd[0], nd[1], nw_dqs[idx], nd[3])                  
              
-        
+                
     # Optional: we can compute a sparsity structure to speed up the optimizer
     def computeSparsity(self, n, m):
         sparsity = lil_matrix((n,m), dtype=np.float32)
@@ -262,45 +332,56 @@ class Fusion:
         '''
         data_term_length = len(self._vertices)
 
-        
         for idx in range(data_term_length):
             locations = self._neighbor_look_up[idx]
-            for i in range(8):
-                sparsity[idx,i] = 1
             for loc in locations:
                 for i in range(8):
-                    sparsity[idx, 8 * (loc + 1) + i] = 1
-
+                    sparsity[idx, 8 * loc + i] = 1
+        
         for idx in range(len(self._nodes)):
             for i in range(8):
-                sparsity[data_term_length + 3*idx, 8 * (idx + 1) + i] = 1
-                sparsity[data_term_length + 3*idx + 1, 8 * (idx + 1) + i] = 1
-                sparsity[data_term_length + 3*idx + 2, 8 * (idx + 1) + i] = 1
+                sparsity[data_term_length + 3*idx, 8 * (idx) + i] = 1
+                sparsity[data_term_length + 3*idx + 1, 8 * (idx) + i] = 1
+                sparsity[data_term_length + 3*idx + 2, 8 * (idx) + i] = 1
 
             for nidx in self._neighbor_look_up[self._nodes[idx][0]]:
                 for i in range(8):
-                    sparsity[data_term_length + 3*idx, 8 * (nidx + 1) + i] = 1
-                    sparsity[data_term_length + 3*idx + 1, 8 * (nidx + 1) + i] = 1
-                    sparsity[data_term_length + 3*idx + 2, 8 * (nidx + 1) + i] = 1
+                    sparsity[data_term_length + 3*idx, 8 * (nidx) + i] = 1
+                    sparsity[data_term_length + 3*idx + 1, 8 * (nidx) + i] = 1
+                    sparsity[data_term_length + 3*idx + 2, 8 * (nidx) + i] = 1
         
         
         return sparsity
 
+    def computef_lw(self,x,tdw,trw):
+        f = []
+
+        # Data Term only        
+        for idx in range(len(self._vertices)):
+            locations = self._neighbor_look_up[idx]
+            knn_dqs = [self._nodes[i][2] for i in locations]
+            vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = x)
+            p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
+            f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
+        
+        return np.array(f)
+    
     # Compute residual function. Input is a flattened vector {dg_SE3}
     def computef(self, x, tdw, trw, rw):
         f = []
-        m_lw = x[:8]
-        dqs = np.split(x[8:], len(x[8:])/8)
+        dqs = np.split(x, len(x)/8)
 
+        dte = 0
+        rte = 0
         # Data Term        
         for idx in range(len(self._vertices)):
             locations = self._neighbor_look_up[idx]
             knn_dqs = [dqs[i] for i in locations]
-            vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = m_lw)                    
+            vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = self._lw)                    
             p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
             #f.append(p2s)
             f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
-
+            dte += f[-1]**2
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
             dgi_se3 = dqs[idx]
@@ -309,8 +390,15 @@ class Fusion:
                dgj_se3 = dqs[nidx]
                diff = dqb_warp(dgi_se3,dgj_v) - dqb_warp(dgj_se3, dgj_v)
                for i in range(3):
-                   #f.append(rw * 0.1 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
+                   #f.append(rw * 0.01 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
                    f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
+                   rte += f[-1]**2
+
+        '''
+        if self._verbose:
+            print("Data term energy:%f; reg term energy:%f"%(dte,rte))
+        '''
+        
         return np.array(f)
 
     '''
@@ -324,7 +412,7 @@ class Fusion:
     '''
     def warp(self, pos, dqs = None, locations = None, normal = None, dmax = None, m_lw = None):
         if dqs is None or locations is None: 
-            pts, kdidx = self._kdtree.query(pos, k=self._knn+1)
+            dists, kdidx = self._kdtree.query(pos, k=self._knn+1)
             locations = kdidx[:-1]
             dqs = [self._nodes[i][2] for i in locations]
         
@@ -349,7 +437,7 @@ class Fusion:
     # Interpolate a se3 matrix from k-nearest nodes to pos.
     def dq_blend(self, pos, dqs = None, locations = None, dmax = None):
         if dqs is None or locations is None: 
-            pts, locations = self._kdtree.query(pos, k=self._knn)
+            dists, locations = self._kdtree.query(pos, k=self._knn)
             dqs = [self._nodes[i][2] for i in locations]
 
         dqb = np.zeros(8)
@@ -359,34 +447,33 @@ class Fusion:
             if dmax is None:
                 w = math.exp( -1.0 * (la.norm(pos - dg_v)/(2*dg_w))**2)
                 dqb += w * dg_dq
-                if w == 0:
-                    print("Zero weight???? norm/dmax", la.norm(pos-dg_v), dg_w)
             else:
                 w = math.exp( -1.0 * (la.norm(pos - dg_v)/dmax)**2)
                 dqb += w * dg_dq
-                if w == 0:
-                    print("Zero weight???? norm/dmax", la.norm(pos-dg_v), dmax)
-
                 
         #Hackhack
         if la.norm(dqb) == 0:
-            print('Really weird thing just happend!!!! blended dq is a zero vector')
-            print('dqs:', dqs)
-            print('locations:', locations)
+            if self._verbose:
+                print('Really weird thing just happend!!!! blended dq is a zero vector')
+                print('dqs:', dqs)
+                print('locations:', locations)
             return np.array([1,0,0,0,0,0,0,0],dtype=np.float32)
 
         return dqb / la.norm(dqb)
     
     # Mesh vertices and normal extraction from current tsdf in canonical space
-    def marching_cubes(self, tsdf = None):
+    def marching_cubes(self, tsdf = None, step_size = 0):
+
+        if step_size < 1:
+            step_size = self._marching_cubes_step_size
         
         if tsdf is not None:
             return measure.marching_cubes_lewiner(tsdf,
-                                                  step_size = self._marching_cubes_step_size,
+                                                  step_size = step_size,
                                                   allow_degenerate=False)
 
         self._vertices, self._faces, self._normals, values = measure.marching_cubes_lewiner(self._tsdf,
-                                                                                            step_size = self._marching_cubes_step_size,
+                                                                                            step_size = step_size,
                                                                                             allow_degenerate=False)
         if self._verbose:
             print("Marching Cubes result: number of extracted vertices is %d" % (len(self._vertices)))

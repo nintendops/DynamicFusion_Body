@@ -3,14 +3,14 @@ import os
 import cProfile
 from numpy import linalg as la
 from skimage import measure
-from skimage.draw import ellipsoid
+from skimage.draw import ellipse, ellipsoid
 from core import *
 from core.util import *
 from core.transformation import random_rotation_matrix
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-TEST_INPUT = True
+
 TEST_FUSION = True
 TEST_FUSION_DUMMY = False
 TEST_UTIL = False
@@ -36,15 +36,19 @@ if __name__ == "__main__":
 
     # Generate a level set about zero of two identical ellipsoids in 3D
     ellip_base = ellipsoid(6, 10, 16, levelset=True)
-    volume = np.concatenate((ellip_base[:-1, ...], ellip_base[2:, ...]), axis=0)
+    e2 = ellipsoid(6,10,16, levelset=True)
+    volume = ellip_base[:-1, ...]
+    volume2 = e2[:-1, ...]
     
     if TEST_FUSION_DUMMY:
-        fus = Fusion(volume, volume.min(), subsample_rate = 2, verbose = True)
+
+        fus = Fusion(volume, volume.min(), marching_cubes_step_size = 3, subsample_rate = 2, verbose = True)
+        
         print("Solving for a test iteration")
-        fus.solve(fus._vertices + 0.01)
-        print("skip finding correspondence...")
+        fus.setupCorrespondences(volume2, method = 'clpts')
+        fus.solve(method = 'clpts', tukey_data_weight = 1, regularization_weight=10)
         print("Updating TSDF...")
-        fus.updateTSDF(volume)
+        fus.updateTSDF()
         print("Updating deformation graph...")
         fus.update_graph()
         
@@ -54,7 +58,6 @@ if __name__ == "__main__":
         ax = fig.add_subplot(111, projection='3d')
         # Fancy indexing: `verts[faces]` to generate a collection of triangles
         verts, faces, ns, vs = measure.marching_cubes_lewiner(fus._tsdf,
-                                                  level=0,
                                                   step_size = 1,
                                                   allow_degenerate=False)
 
@@ -70,19 +73,19 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.show()
 
-    if TEST_INPUT:
+    if TEST_FUSION:
         sdf_filepath = os.path.join(DATA_PATH, '0000.64.dist')
         b_min, b_max, volume, closest_points = load_sdf(sdf_filepath, verbose=True)
         
         if TEST_FUSION:
             # Generate a level set about zero of two identical ellipsoids in 3D
-            fus = Fusion(volume, volume.min(), subsample_rate = 3, marching_cubes_step_size = 3, verbose = True)
+            fus = Fusion(volume, volume.min(), subsample_rate = 1.5, knn = 3, marching_cubes_step_size = 2, verbose = True)
             fus.write_canonical_mesh(DATA_PATH, 'original.obj')
             f_iter = 1
             datas = os.listdir(DATA_PATH)
             datas.sort()
             for tfile in datas:
-                if f_iter > 5:
+                if f_iter > 10:
                     break
                 if tfile.endswith('64.dist') and not tfile.endswith('0000.64.dist'):
                     try:
@@ -90,14 +93,14 @@ if __name__ == "__main__":
                         print("Processing iteration:", f_iter)
                         print("New shape of volume: (%d, %d, %d)" % volume.shape)
                         print("Setting up correspondences...")
-                        fus.setupCorrespondences(volume)
-                        cProfile.run('fus.solve()', 'profiles/solve_' + str(f_iter))
+                        fus.setupCorrespondences(volume, method = 'clpts')
+                        cProfile.run('fus.solve(regularization_weight=0.02)', 'profiles/solve_' + str(f_iter))
                         print("Updating TSDF...")
                         cProfile.run('fus.updateTSDF()','profiles/updateTSDF_' + str(f_iter))
                         print("Updating deformation graph...")
                         fus.update_graph()
                         f_iter += 1
-                    except NameError as e:
+                    except ValueError as e:
                         print(str(e))
                         break    
             fus.write_canonical_mesh(DATA_PATH,'mesh.obj')
