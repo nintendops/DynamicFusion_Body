@@ -16,9 +16,17 @@ fusion.update_graph()
 
 All input/output datatypes should be be numpy arrays.   
 
+Important hyperparameters:
+- subsample_rate: determine the density of deformation nodes embedded in the canonical mesh
+- marching_cubes_step_size: determine the quality of the extracted mesh from marching cube
+- knn: affect blending and regularization.
+- wmax: maximum weight that can be accumulated in tsdf update. Affect the influences of the later fused frames.
+- method for finding correspondences
+
 TODO: 
 - optimizer is too slow. Most time spent on Jacobian estimation
-- (Optional) implement a closest point method for finding correspondence
+- (Optional) provide an option to calculate dmax for DQB weight
+
 
 '''
 
@@ -95,27 +103,11 @@ class Fusion:
 
         # construct kd tree
         self._kdtree = KDTree(nodes_v)
-        self._neighbor_look_up.clear()
+        self._neighbor_look_up = []
         for vert in self._vertices:
             dists, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
 
-        # initialize weight
-        if self._verbose:
-            print('initializing weight...')
-        it = np.nditer(self._tsdf, flags=['multi_index'], op_flags = ['readwrite'])
-        while not it.finished:
-            tsdf_s = it[0]
-            pos = np.array(it.multi_index, dtype=np.float32)
-            dists, locations = self._kdtree.query(pos, k=self._knn)
-            if tsdf_s > -1 * self._tdist:
-                wi = 0
-                for idx in locations:
-                    wi += la.norm(self._nodes[idx][1] - pos) / len(locations)
-                self._tsdfw[it.multi_index] = wi
-            it.iternext()
-
-        
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
     def updateTSDF(self, curr_tsdf = None, wmax = 100.0):
 
@@ -149,6 +141,10 @@ class Fusion:
                 for idx in locations:
                     wi += la.norm(self._nodes[idx][1] - pos) / len(locations)
                 # Update (v(x),w(x))
+
+                if wi_t == 0:
+                    wi_t = wi
+                
                 it[0] = (it[0] * wi_t + min(self._tdist, tsdf_l)*wi)/(wi + wi_t)
                 self._tsdfw[it.multi_index] = min(wi + wi_t, wmax)
 
@@ -190,7 +186,7 @@ class Fusion:
             
         # recompute KDTree and neighbors
         self._kdtree = KDTree(np.array([n[1] for n in self._nodes]))
-        self._neighbor_look_up.clear()
+        self._neighbor_look_up = []
         for vert in self._vertices:
             dists, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
@@ -203,9 +199,10 @@ class Fusion:
         
 
 
-    def setupCorrespondences(self, curr_tsdf, method = 'cnn'):
+    def setupCorrespondences(self, curr_tsdf, method = 'cnn', prune_result = True, tolerance = 0.2):
         self._curr_tsdf = curr_tsdf
         self._correspondences = []
+        idx_pruned = []
         lverts, lfaces, lnormals, lvalues = self.marching_cubes(curr_tsdf, step_size = 1)
 
         print('lverts shape:',lverts.shape)
@@ -220,10 +217,11 @@ class Fusion:
             for idx in range(len(self._vertices)):
                 locations = self._neighbor_look_up[idx]
                 knn_dqs = [self._nodes[i][2] for i in locations]
-                v_warped, n_warped = self.warp(self._vertices[idx],knn_dqs,locations,self._normals[idx],m_lw = self._lw)
+                v_warped, n_warped = self.warp(self._vertices[idx],knn_dqs,locations,self._normals[idx], m_lw = self._lw)
                 dists, iidx = l_kdtree.query(v_warped,k=self._knn)
                 best_pt = lverts[iidx[0]]
-                best_cost = 1.0
+                best_cost = 1
+                
                 
                 for idx in iidx:
                     p = lverts[idx]
@@ -231,12 +229,10 @@ class Fusion:
                     if cost < best_cost:
                         best_cost = cost
                         best_pt = p
-                if best_cost >= 1.0:
+                if best_cost > tolerance:
+                    idx_pruned.append(idx)
                     i+=1
                 self._correspondences.append(best_pt)
-
-            if self._verbose:
-                print('rate of overly large cost', float(i)/float(len(self._vertices)))
         else:
             if self._verbose:
                 print('Using cnn method for finding correspondences...')
@@ -246,7 +242,36 @@ class Fusion:
             for idx in range(len(s_feats)):
                 dists, iidx = l_kdtree.query(s_feats[idx])
                 self._correspondences.append(lverts[iidx])
-        
+
+        if prune_result:
+            if method == 'cnn':
+                # Prune out bad correspondences
+                for idx in range(len(self._vertices)):
+                    locations = self._neighbor_look_up[idx]
+                    knn_dqs = [self._nodes[i][2] for i in locations]
+                    v_warped, n_warped = self.warp(self._vertices[idx],knn_dqs,locations,self._normals[idx], m_lw = self._lw)
+                    cost = abs(np.dot(n_warped,v_warped - self._correspondences[idx]))
+                    if cost > tolerance:
+                        idx_pruned.append(idx)
+
+            if self._verbose:
+                print('ratio of correspondence outlier rejection', float(len(idx_pruned))/float(len(self._vertices)))
+
+            # update data (HACKHACK)
+            self._vertices = np.delete(self._vertices, idx_pruned, axis=0)
+            self._correspondences = np.delete(self._correspondences, idx_pruned, axis=0)
+            self._neighbor_look_up = np.delete(self._neighbor_look_up, idx_pruned, axis=0)
+            self._normals = np.delete(self._normals, idx_pruned, axis=0)
+            self._faces = None
+
+            vert_kdtree = KDTree(self._vertices)
+            for i in range(len(self._nodes)):
+                pos = self._nodes[i][1]
+                se3 = self._nodes[i][2]
+                dist, vidx = vert_kdtree.query(pos)
+                self._nodes[i] = (vidx, pos, se3, 2*self._radius)
+
+
 
     # Solve for a warp field {dg_SE} with correspondences to the live frame
     '''
@@ -278,22 +303,27 @@ class Fusion:
         self._itercounter += 1
         solver_verbose_level = 0
         if self._verbose:
-            print("Optimizing warp field...")
             solver_verbose_level = 2
 
         # We may consider using other optimization library
         if precompute_lw:
             if self._verbose:
-                print('estimating global transformation lw')
+                print('estimating global transformation lw...')
                 
-            for iter in range(iteration):
-                if iter > 0 and correspondences is None:
+            for iter in range(1):
+                values = self._lw
+                opt_result = least_squares(self.computef_lw,
+                                           values,
+                                           max_nfev = 100,
+                                           verbose=solver_verbose_level,
+                                           args=(tukey_data_weight, 1))
+                print('global transformation found:', DQTSE3(opt_result.x))
+                self._lw = opt_result.x
+                if method == 'clpts':
                     self.setupCorrespondences(self._curr_tsdf, method = 'clpts')
 
-                values = self._lw
-                opt_result = least_squares(self.computef_lw, values, verbose=solver_verbose_level, args=(tukey_data_weight, 1))
-                self._lw = opt_result.x
-        
+        if self._verbose:
+            print('estimating warp field...')
         for iter in range(iteration):
             values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
             n = len(self._vertices) + 3 * self._knn * len(self._nodes)
@@ -308,6 +338,7 @@ class Fusion:
                                        ftol=1e-5,
                                        tr_solver='lsmr',
                                        jac_sparsity = self.computeSparsity(n, len(values)),
+                                       loss = 'huber',
                                        max_nfev = 100,
                                        verbose = solver_verbose_level,
                                        args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
@@ -362,8 +393,9 @@ class Fusion:
             knn_dqs = [self._nodes[i][2] for i in locations]
             vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = x)
             p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-            f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
-        
+            #f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
+            f.append(p2s)
+            
         return np.array(f)
     
     # Compute residual function. Input is a flattened vector {dg_SE3}
@@ -379,8 +411,8 @@ class Fusion:
             knn_dqs = [dqs[i] for i in locations]
             vert_warped, n_warped = self.warp(self._vertices[idx], knn_dqs, locations, self._normals[idx], m_lw = self._lw)                    
             p2s = np.dot(n_warped, vert_warped - self._correspondences[idx])
-            #f.append(p2s)
-            f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
+            f.append(p2s)
+            #f.append(np.sign(p2s) * math.sqrt(tukey_biweight_loss(abs(p2s),tdw)))
             dte += f[-1]**2
         # Regularization Term: Instead of regularization tree, just use the simpler knn nodes for now
         for idx in range(len(self._nodes)):
@@ -390,8 +422,8 @@ class Fusion:
                dgj_se3 = dqs[nidx]
                diff = dqb_warp(dgi_se3,dgj_v) - dqb_warp(dgj_se3, dgj_v)
                for i in range(3):
-                   #f.append(rw * 0.01 * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
-                   f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
+                   f.append(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * diff[i]) 
+                   #f.append(np.sign(diff[i]) * math.sqrt(rw * max(self._nodes[idx][3], self._nodes[nidx][3]) * huber_loss(diff[i], trw)))
                    rte += f[-1]**2
 
         '''

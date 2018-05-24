@@ -1,4 +1,5 @@
 import numpy as np
+import sys
 import os
 import cProfile
 from numpy import linalg as la
@@ -39,10 +40,14 @@ if __name__ == "__main__":
     e2 = ellipsoid(6,10,16, levelset=True)
     volume = ellip_base[:-1, ...]
     volume2 = e2[:-1, ...]
+
+    output_mesh_name = 'mesh.obj'
+    if len(sys.argv) >= 2:
+        output_mesh_name = sys.argv[1]
     
     if TEST_FUSION_DUMMY:
 
-        fus = Fusion(volume, volume.min(), marching_cubes_step_size = 3, subsample_rate = 2, verbose = True)
+        fus = Fusion(volume, volume.max(), marching_cubes_step_size = 3, subsample_rate = 2, verbose = True)
         
         print("Solving for a test iteration")
         fus.setupCorrespondences(volume2, method = 'clpts')
@@ -79,7 +84,7 @@ if __name__ == "__main__":
         
         if TEST_FUSION:
             # Generate a level set about zero of two identical ellipsoids in 3D
-            fus = Fusion(volume, volume.min(), subsample_rate = 1.5, knn = 3, marching_cubes_step_size = 2, verbose = True)
+            fus = Fusion(volume, volume.max(), subsample_rate = 1.5, knn = 3, marching_cubes_step_size = 2, verbose = True)
             fus.write_canonical_mesh(DATA_PATH, 'original.obj')
             f_iter = 1
             datas = os.listdir(DATA_PATH)
@@ -94,7 +99,7 @@ if __name__ == "__main__":
                         print("New shape of volume: (%d, %d, %d)" % volume.shape)
                         print("Setting up correspondences...")
                         fus.setupCorrespondences(volume, method = 'clpts')
-                        cProfile.run('fus.solve(regularization_weight=0.02)', 'profiles/solve_' + str(f_iter))
+                        cProfile.run('fus.solve(regularization_weight=1, method = "clpts")', 'profiles/solve_' + str(f_iter))
                         print("Updating TSDF...")
                         cProfile.run('fus.updateTSDF()','profiles/updateTSDF_' + str(f_iter))
                         print("Updating deformation graph...")
@@ -102,8 +107,10 @@ if __name__ == "__main__":
                         f_iter += 1
                     except ValueError as e:
                         print(str(e))
-                        break    
-            fus.write_canonical_mesh(DATA_PATH,'mesh.obj')
+                        break
+                    except KeyboardInterrupt:
+                        break
+            fus.write_canonical_mesh(DATA_PATH,output_mesh_name)
             
     if TEST_UTIL:
         # Testing DQ functions
