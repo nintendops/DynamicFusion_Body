@@ -69,8 +69,7 @@ class Fusion:
         if use_cnn:
             self.input, self._feature, self._sess = cnnInitialize()
         else:
-            self.input, self._feature, self._sess = None
-            
+            self._sess = None
         if verbose:
             print("Running initial marching cubes")
         self.marching_cubes()
@@ -289,7 +288,7 @@ class Fusion:
               precompute_lw = True,
               tukey_data_weight =  0.2,
               huber_regularization_weight = 0.001,
-              regularization_weight = 200):
+              regularization_weight = 1):
 
         if correspondences is not None:
             self._correspondences = correspondences
@@ -298,7 +297,7 @@ class Fusion:
 
         iteration = 1
         if method == 'clpts':
-            iteration = 2
+            iteration = 3
 
         self._itercounter += 1
         solver_verbose_level = 0
@@ -330,7 +329,14 @@ class Fusion:
                     
             if iter > 0 and correspondences is None:
                 self.setupCorrespondences(self._curr_tsdf, method = 'clpts')
-                                          
+
+            f =  self.computef(values,tukey_data_weight,huber_regularization_weight, regularization_weight)
+            cost_before = 0.5 * np.inner(f,f)
+                
+            if self._verbose:
+                print("Cost before optimization:",cost_before)
+                print('Current regularization weight:',regularization_weight)
+            
             opt_result = least_squares(self.computef,
                                        values,
                                        method='trf',
@@ -339,7 +345,7 @@ class Fusion:
                                        tr_solver='lsmr',
                                        jac_sparsity = self.computeSparsity(n, len(values)),
                                        loss = 'huber',
-                                       max_nfev = 100,
+                                       max_nfev = 20,
                                        verbose = solver_verbose_level,
                                        args=(tukey_data_weight, huber_regularization_weight, regularization_weight))
             # Results: (x, cost, fun, jac, grad, optimality)
@@ -353,7 +359,16 @@ class Fusion:
             for idx in range(len(self._nodes)):
                 nd = self._nodes[idx]
                 self._nodes[idx] = (nd[0], nd[1], nw_dqs[idx], nd[3])                  
-             
+
+            reduct_rate = (cost_before - opt_result.cost)/cost_before
+            # relax regularization
+            if reduct_rate > 0.05 and reduct_rate < 0.9:
+                regularization_weight /= 8
+                if self._verbose:
+                    print('Cost reduction rate:', reduct_rate)
+            else:
+                break
+            
                 
     # Optional: we can compute a sparsity structure to speed up the optimizer
     def computeSparsity(self, n, m):
