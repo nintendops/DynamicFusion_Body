@@ -1,0 +1,5 @@
+original: mesh extracted from the first mesh (canonical)
+high_reg_no_pruning_ICP: mesh fused with high regularization weight. Bad correspondences found by ICP were not rejected. 
+low_reg_with_pruning_ICP: mesh fused with low regularization weight. Bad correspondences found by ICP were rejected.
+low_reg_with_pruning_CNN: mesh fused with low regularization weight. Bad correspondences found by CNN were rejected.
+
