@@ -47,14 +47,12 @@ from . import *
 DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'data')
 
 class Fusion:
-    def __init__(self, tsdf, trunc_distance, subsample_rate = 5.0, knn = 4, marching_cubes_step_size = 3, verbose = False, use_cnn = True, write_warpfield = True):
+    def __init__(self, trunc_distance, subsample_rate = 5.0, knn = 4, marching_cubes_step_size = 3, verbose = False, use_cnn = True, write_warpfield = True):
         if type(tsdf) is not np.ndarray or tsdf.ndim != 3:
             raise ValueError('Only 3D numpy array is accepted as tsdf')
 
         self._itercounter = 0
-        self._tsdf = tsdf
         self._curr_tsdf = None
-        self._tsdfw = np.zeros(tsdf.shape)
         self._tdist = abs(trunc_distance)
         self._lw = np.array([1,0,0,0,0,0.1,0,0],dtype=np.float32)
         self._knn = knn
@@ -70,6 +68,21 @@ class Fusion:
             self.input, self._feature, self._sess = cnnInitialize()
         else:
             self._sess = None
+
+ 
+    def InitializeCanonicalSpace(self, tsdf = None,depths = None, lws = None, K = None, tsdf_size = 256):
+        self._tsdfw = np.zeros(tsdf.shape)
+        if tsdf is not None:
+            self._tsdf = tsdf
+        elif depths is not None and depths is not None and lws is not None and K is not None:
+            self._K = K
+            self._Kinv = la.inv(K)
+            self._tsdf = np.zeros((tsdf_size,tsdf_size,tsdf_size)) + self._tdist
+            for i in len(depths):
+                if verbose:
+                    print('Fusing %d depth map'%(i))
+                fuseDepths(depths[i],lws[i],self._tsdf, self._tsdfw)
+            
         if verbose:
             print("Running initial marching cubes")
         self.marching_cubes()
@@ -77,11 +90,13 @@ class Fusion:
         for f in self._faces:
             average_distances.append(self.average_edge_dist_in_face(f))
         self._radius = subsample_rate * np.average(np.array(average_distances))
-
+        
         if verbose:
             print("Constructing initial graph...")
         self.construct_graph()
+
         
+
     # Construct deformation graph from canonical vertices
     def construct_graph(self):
         # uniform sampling
@@ -106,6 +121,33 @@ class Fusion:
         for vert in self._vertices:
             dists, idx = self._kdtree.query(vert, k=self._knn)
             self._neighbor_look_up.append(idx)
+
+
+    # fuse a depth map into current tsdf
+    def fuseDepths(self, dm, lw, tsdf, tsdfw, wmax = 100.0):
+        (dmx,dmy) = current_dm.shape
+        itest = 0
+        it = np.nditer(tsdf, flags=['multi_index'], op_flags = ['readwrite'])
+        while not it.finished:
+            tsdf_s = np.copy(it[0])
+            pos = np.array(it.multi_index, dtype=np.float32)
+            (u,v) = project_to_pixel(lw, self._K, pos)
+            if u >= 0 and u < dmx and v >= 0 and v < dmy:
+                uc = current_dm[round(u)][round(v)] * np.array([u,v,1])
+                # signed distance along principal axis of the camera
+                tsdf_l = (np.matmul(self._Kinv,uc))[2] - pos[2]
+
+                # TODO: weight here does not make a lot of sense
+                if tsdf_l > -1 * self._tdist:
+                    wi = 1
+                    wi_t = tsdfw[it.multi_index]
+                    # Update (v(x),w(x))
+                    it[0] = (it[0] * wi_t + min(self._tdist, tsdf_l)*wi)/(wi + wi_t)
+                    tsdfw[it.multi_index] = min(wi + wi_t, wmax)
+
+            itest += 1
+            it.iternext()
+
 
     # Perform surface fusion for each voxel center with a tsdf query function for the live frame.
     def updateTSDF(self, curr_tsdf = None, wmax = 100.0):
@@ -324,12 +366,12 @@ class Fusion:
         if self._verbose:
             print('estimating warp field...')
         for iter in range(iteration):
-            values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
-            n = len(self._vertices) + 3 * self._knn * len(self._nodes)
-                    
+
             if iter > 0 and correspondences is None:
                 self.setupCorrespondences(self._curr_tsdf, method = 'clpts')
 
+            values = np.concatenate([ dg[2] for dg in self._nodes], axis=0).flatten()
+            n = len(self._vertices) + 3 * self._knn * len(self._nodes)                    
             f =  self.computef(values,tukey_data_weight,huber_regularization_weight, regularization_weight)
             cost_before = 0.5 * np.inner(f,f)
                 
@@ -540,7 +582,7 @@ class Fusion:
         for n in normals:
             fpath.write('vn %f %f %f\n'%(n[0],n[1],n[2]))
         for f in faces:
-            fpath.write('f %d %d %d\n'%(f[0],f[1],f[2]))
+            fpath.write('f %d %d %d\n'%(f[0] + 1,f[1] + 1,f[2] + 1))
         fpath.close()
 
     # Process a warp field file and write the live frame mesh

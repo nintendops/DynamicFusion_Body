@@ -5,6 +5,7 @@ import cProfile
 from numpy import linalg as la
 from skimage import measure
 from skimage.draw import ellipse, ellipsoid
+from scipy.spatial import KDTree
 from core import *
 from core.util import *
 from core.transformation import random_rotation_matrix
@@ -12,9 +13,11 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
-TEST_FUSION = True
+TEST_FUSION_DM = True
+TEST_FUSION = False
 TEST_FUSION_DUMMY = False
 TEST_UTIL = False
+TEST_CUSTOM = False
 
 def visualize(tsdf):
     fig = plt.figure(figsize=(10, 10))
@@ -33,6 +36,25 @@ def visualize(tsdf):
     plt.show()
     
 
+def readObj(filename):
+    objFile = open(filename, 'r')
+    vertexList = []
+
+    for line in objFile:
+        split = line.split()
+        if not len(split):
+            continue
+        if split[0] == 'v':
+            vertexList.append(split[1:])
+        elif split[0] == 'vt':
+            pass
+        elif split[0] == 'f':
+            pass
+        elif split[0] == 'vn':
+            pass
+
+    return np.array(vertexList, dtype='float')
+    
 if __name__ == "__main__":
 
     # Generate a level set about zero of two identical ellipsoids in 3D
@@ -44,11 +66,11 @@ if __name__ == "__main__":
     output_mesh_name = 'mesh.obj'
     if len(sys.argv) >= 2:
         output_mesh_name = sys.argv[1]
-    
+
+        
     if TEST_FUSION_DUMMY:
 
-        fus = Fusion(volume, volume.max(), marching_cubes_step_size = 3, subsample_rate = 2, verbose = True)
-        
+        fus = Fusion(volume, volume.max(), marching_cubes_step_size = 0.5, subsample_rate = 2, verbose = True)
         print("Solving for a test iteration")
         fus.setupCorrespondences(volume2, method = 'clpts')
         fus.solve(method = 'clpts', tukey_data_weight = 1, regularization_weight=10)
@@ -81,7 +103,7 @@ if __name__ == "__main__":
     if TEST_FUSION:
         sdf_filepath = os.path.join(DATA_PATH, '0000.64.dist')
         b_min, b_max, volume, closest_points = load_sdf(sdf_filepath, verbose=True)
-        
+        print(volume.max())
         if TEST_FUSION:
             # Generate a level set about zero of two identical ellipsoids in 3D
             fus = Fusion(volume, volume.max(), subsample_rate = 1.5, knn = 3, marching_cubes_step_size = 2, verbose = True, use_cnn = False)
@@ -111,7 +133,68 @@ if __name__ == "__main__":
                     except KeyboardInterrupt:
                         break
             fus.write_canonical_mesh(DATA_PATH,output_mesh_name)
-            
+
+
+    if TEST_FUSION_DM:
+        K = np.array([2000,0,800,0,2000,600,0,0,1],dtype='float').reshape(3,3)
+        Kinv = la.inv(K)
+        datas = os.listdir(DATA_PATH)
+        datas = sorted(datas)
+        depths = []
+        lws = []
+        for fname in datas:
+            path = os.path.join(DATA_PATH,fname)
+            if fname.endswith('.npy'):
+                print(fname)
+                depths.append(np.load(path))
+            elif fname.startswith('proj') and fname.endswith('.txt'):
+                print(fname)
+                P = read_proj_matrix(path)
+                lws.append(np.matmul(Kinv,P))
+
+        print("loaded (%d, %d) of depths and matrices"% (len(depths), len(lws)))
+        fus = FusionDM(0.2,K, tsdf_res = 256, verbose = True)
+
+        fus.compute_live_tsdf(depths,lws,useICP = False, outputMesh=True)
+
+    if TEST_CUSTOM:
+        K = np.array([2000,0,800,0,2000,600,0,0,1],dtype='float').reshape(3,3)
+        Kinv = la.inv(K)
+        datas = os.listdir(DATA_PATH)
+        datas = sorted(datas)
+        depths = []
+        lws = []
+        for fname in datas:
+            path = os.path.join(DATA_PATH,fname)
+            if fname.endswith('.npy'):
+                print(fname)
+                depths.append(np.load(path))
+            elif fname.endswith('.txt') and fname.startswith('proj'):
+                print(fname)
+                P = read_proj_matrix(path)
+                lws.append(np.matmul(Kinv,P))
+        gtverts = readObj(os.path.join(DATA_PATH,'Jamie.obj'))
+        kdt = KDTree(gtverts)
+        
+
+        for idx in range(2):
+            fpath = open(os.path.join(DATA_PATH,'transformed_pts' + str(idx) + '.txt'),'w')
+            score = 0
+            dm = depths[idx]
+            lw = lws[idx]
+            lw_inv = inverse_rigid_matrix(lw)
+            dmx, dmy = dm.shape
+            for dx in range(dmx):
+                for dy in range(dmy):
+                    uv = np.array([dy,dx,1],dtype='float')
+                    d = -1 * dm[dx,dy]
+                    if d > 0:
+                        pos_local = np.matmul(Kinv, d*uv)
+                        pos_global = np.matmul(lw_inv, np.append(pos_local,1))
+                        #dist, nidx = kdt.query(pos_global)
+                        fpath.write('%f %f %f\n'%(pos_global[0], pos_global[1], pos_global[2]))
+            fpath.close()
+
     if TEST_UTIL:
         # Testing DQ functions
         print('Testing DQ functions')

@@ -304,4 +304,43 @@ def dual_quaternion_conjugate(dquaternion):
     return dq
 
 
+'''
+lw: 3x4 camera extrinsic
+K: 3x3 camera intrinsic 
+pos: (x,y,z)
+'''
+def project_to_pixel(K, pos, lw = None):
+    p = []
+    if lw is None:
+        if len(pos) == 4:
+            pos = pos[:-1]
+        p = np.matmul(K,pos)
+        if p[2] == 0:
+            return (None, None)
+        return (p[0]/p[2], p[1]/p[2])
+    else:
+        if len(pos) == 3:
+            pos = np.append(pos,1)
+        p = np.matmul(K, np.matmul(lw,pos))
+        if p[2] == 0:
+            return (None, None)
+        else:
+            return (p[0]/p[2],p[1]/p[2])
 
+def read_proj_matrix(fpath):
+    f = open(fpath,'r')
+    arr = []
+    for line in f:
+        arr.append(line[:-1].split(' '))
+    return np.array(arr,dtype='float')
+
+# find the inverse of a 3x4 rigid transformation matrix
+def inverse_rigid_matrix(A):
+    R,t = decompose_se3(A)
+    R_inv = la.inv(R)
+    t_inv = np.matmul(R_inv,t) * -1
+    M = np.zeros((3,4))
+    M[0] = np.append(R_inv[0],t_inv[0])
+    M[1] = np.append(R_inv[1],t_inv[1])
+    M[2] = np.append(R_inv[2],t_inv[2])
+    return M
