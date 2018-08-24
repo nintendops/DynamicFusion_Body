@@ -340,9 +340,14 @@ class FusionDM:
         fpath = open(os.path.join(path, filename), 'w')
         verts, faces, normals, values = measure.marching_cubes_lewiner(self._tsdf, level=0, step_size=1,
                                                                        allow_degenerate=False)
+
+        rot = self._IND[:3,:3]
+        trans = self._IND[:3, 3]
         for v in verts:
+            v = np.matmul(rot, v) + trans
             fpath.write('v %f %f %f\n' % (v[0], v[1], v[2]))
         for n in normals:
+            n = np.matmul(rot, n)
             fpath.write('vn %f %f %f\n' % (n[0], n[1], n[2]))
         for f in faces:
             fpath.write('f %d//%d %d//%d %d//%d\n' % (f[0] + 1, f[0] + 1, f[1] + 1, f[1] + 1, f[2] + 1, f[2] + 1))
