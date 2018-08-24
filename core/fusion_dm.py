@@ -536,6 +536,7 @@ class FusionDM:
                                 self.dq_blend(nodes_new_v[i]),
                                 2 * self._radius))
 
+
         if self._verbose:
             print("Inserted %d new deformation nodes. Current number of deformation nodes: %d" % (
                 len(nodes_new_v), len(self._nodes)))
@@ -596,6 +597,31 @@ class FusionDM_GPU(FusionDM):
         print('shape of depth map:', dm.shape)
         sdf_center = np.zeros(3) + self._tsdf_res / 2
         kernel = r"""
+        inline float interpolation(__global const float *depth, float px, float py)
+        {
+            int x = floor(px);
+            int y = floor(py);
+            float wx = px - x;
+            float wy = py - y;
+            
+            int left_up_id = y * DM_X + x;
+            int left_bot_id = (y+1) * DM_X + x;
+            int right_up_id = left_up_id + 1;
+            int right_bot_id = left_bot_id + 1;
+            
+            float up_depth = depth[left_up_id] * (1 - wx) + depth[right_up_id] * wx;
+            float bot_depth = depth[left_bot_id] * (1 - wx) + depth[right_bot_id] * wx;
+            float ret = up_depth * (1 - wy) + bot_depth * wy;
+            
+            return ret;
+        }
+        
+        inline float naive(__global const float *depth, float px, float py)
+        {
+            int id = round(py) * DM_X + round(px);
+            return depth[id];        
+        }
+        
         __kernel void fuse_depth(__global float *tsdf, __global float *tsdf_w, __global const float *depth, __global const float *proj, __global const float *K_inv)
         {
             int x = get_global_id(0);
@@ -611,12 +637,11 @@ class FusionDM_GPU(FusionDM):
             float w = proj[8] * x + proj[9] * y + proj[10] * z + proj[11];
         
             // depth location
-            float px = round(u / w);
-            float py = round(v / w);
-            if (px < 0 || py < 0 || px > DM_X - 1 || py > DM_Y - 1)
+            float px = u / w;
+            float py = v / w;
+            if (px < 0 || py < 0 || px >= DM_X - 1 || py >= DM_Y - 1)
                 return;
-            int depth_idx = py * DM_X + px;
-            float pz = -depth[depth_idx];
+            float pz = -interpolation(depth, px, py);
             
             float dz;
             if (pz <= TDIST)
