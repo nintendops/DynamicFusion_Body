@@ -634,7 +634,7 @@ class FusionDM_GPU(FusionDM):
             int z = get_global_id(2);
         
             // index in the tsdf array
-            int idx = z * RES_X * RES_Y + y * RES_X + x;
+            int idx = x * RES_Z * RES_Y + y * RES_Z + z;
         
             // project to the image space
             float u = proj[0] * x + proj[1] * y + proj[2] * z + proj[3];
